@@ -24,4 +24,12 @@ mk_socket_t *mk_socket_tcp_connect(const char *host, uint16_t port);
    Used by the server accept path. Returns NULL on alloc failure. */
 mk_socket_t *mk_socket_tcp_wrap(int fd);
 
+#ifdef HAVE_OPENSSL
+/* Create a TLS socket connected to host:port.
+   Blocks on connect + TLS handshake, then sets non-blocking for I/O.
+   Verifies peer certificate against system CA store.
+   Returns NULL on failure. Caller must call sock->close(sock). */
+mk_socket_t *mk_socket_tls_connect(const char *host, uint16_t port);
+#endif
+
 #endif /* MICROKERNEL_MK_SOCKET_H */

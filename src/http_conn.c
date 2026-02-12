@@ -1060,10 +1060,15 @@ http_conn_id_t actor_http_fetch(runtime_t *rt, const char *method,
     parsed_url_t parsed;
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
-    if (url_is_tls(&parsed)) return HTTP_CONN_ID_INVALID; /* TLS not yet */
-
     uint16_t port = url_effective_port(&parsed);
+#ifdef HAVE_OPENSSL
+    mk_socket_t *sock = url_is_tls(&parsed)
+        ? mk_socket_tls_connect(parsed.host, port)
+        : mk_socket_tcp_connect(parsed.host, port);
+#else
+    if (url_is_tls(&parsed)) return HTTP_CONN_ID_INVALID;
     mk_socket_t *sock = mk_socket_tcp_connect(parsed.host, port);
+#endif
     if (!sock) return HTTP_CONN_ID_INVALID;
 
     http_conn_t *conn = alloc_conn(rt);
@@ -1098,10 +1103,15 @@ http_conn_id_t actor_sse_connect(runtime_t *rt, const char *url) {
     parsed_url_t parsed;
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
-    if (url_is_tls(&parsed)) return HTTP_CONN_ID_INVALID;
-
     uint16_t port = url_effective_port(&parsed);
+#ifdef HAVE_OPENSSL
+    mk_socket_t *sock = url_is_tls(&parsed)
+        ? mk_socket_tls_connect(parsed.host, port)
+        : mk_socket_tcp_connect(parsed.host, port);
+#else
+    if (url_is_tls(&parsed)) return HTTP_CONN_ID_INVALID;
     mk_socket_t *sock = mk_socket_tcp_connect(parsed.host, port);
+#endif
     if (!sock) return HTTP_CONN_ID_INVALID;
 
     http_conn_t *conn = alloc_conn(rt);
@@ -1130,11 +1140,15 @@ http_conn_id_t actor_ws_connect(runtime_t *rt, const char *url) {
     parsed_url_t parsed;
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
-    /* ws:// uses plain TCP, wss:// needs TLS (not yet supported) */
-    if (strcmp(parsed.scheme, "wss") == 0) return HTTP_CONN_ID_INVALID;
-
     uint16_t port = url_effective_port(&parsed);
+#ifdef HAVE_OPENSSL
+    mk_socket_t *sock = (strcmp(parsed.scheme, "wss") == 0)
+        ? mk_socket_tls_connect(parsed.host, port)
+        : mk_socket_tcp_connect(parsed.host, port);
+#else
+    if (strcmp(parsed.scheme, "wss") == 0) return HTTP_CONN_ID_INVALID;
     mk_socket_t *sock = mk_socket_tcp_connect(parsed.host, port);
+#endif
     if (!sock) return HTTP_CONN_ID_INVALID;
 
     http_conn_t *conn = alloc_conn(rt);

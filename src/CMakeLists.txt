@@ -29,3 +29,10 @@ target_include_directories(microkernel PRIVATE
 
 find_package(Threads REQUIRED)
 target_link_libraries(microkernel PUBLIC Threads::Threads)
+
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    target_sources(microkernel PRIVATE mk_socket_tls.c)
+    target_link_libraries(microkernel PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(microkernel PUBLIC HAVE_OPENSSL=1)
+endif()

@@ -48,6 +48,7 @@ if(BUILD_REALWORLD_TESTS)
 
     add_realworld_test(test_http_realworld)
     add_realworld_test(test_ws_realworld)
+    add_realworld_test(test_https_realworld)
 endif()
 
 # ── Benchmarks ──────────────────────────────────────────────────────
