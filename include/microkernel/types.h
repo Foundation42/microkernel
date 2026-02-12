@@ -33,6 +33,9 @@ typedef enum {
     ACTOR_STOPPED
 } actor_status_t;
 
+typedef uint32_t timer_id_t;
+#define TIMER_ID_INVALID ((timer_id_t)0)
+
 /* Forward declarations */
 typedef struct message message_t;
 typedef struct mailbox mailbox_t;

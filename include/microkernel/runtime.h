@@ -2,6 +2,7 @@
 #define MICROKERNEL_RUNTIME_H
 
 #include "types.h"
+#include "services.h"
 
 /* Initialization / teardown */
 runtime_t *runtime_init(node_id_t node_id, size_t max_actors);

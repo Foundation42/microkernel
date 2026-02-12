@@ -1,0 +1,61 @@
+#ifndef MICROKERNEL_SERVICES_H
+#define MICROKERNEL_SERVICES_H
+
+#include "types.h"
+
+/* ── System message types (0xFF000000–0xFFFFFFFF reserved) ─────────── */
+
+#define MSG_TIMER    ((msg_type_t)0xFF000001)
+#define MSG_FD_EVENT ((msg_type_t)0xFF000002)
+#define MSG_LOG      ((msg_type_t)0xFF000003)
+
+/* ── Timer payload ─────────────────────────────────────────────────── */
+
+typedef struct {
+    timer_id_t id;
+    uint64_t   expirations; /* number of expirations (>1 if overrun) */
+} timer_payload_t;
+
+/* ── FD event payload ──────────────────────────────────────────────── */
+
+typedef struct {
+    int      fd;
+    uint32_t events; /* POLLIN, POLLOUT, etc. */
+} fd_event_payload_t;
+
+/* ── Log levels ────────────────────────────────────────────────────── */
+
+#define LOG_DEBUG 0
+#define LOG_INFO  1
+#define LOG_WARN  2
+#define LOG_ERROR 3
+
+typedef struct {
+    int        level;
+    actor_id_t source;
+    char       text[256];
+} log_payload_t;
+
+/* ── Timer API ─────────────────────────────────────────────────────── */
+
+timer_id_t actor_set_timer(runtime_t *rt, uint64_t interval_ms, bool periodic);
+bool       actor_cancel_timer(runtime_t *rt, timer_id_t id);
+
+/* ── FD watcher API ────────────────────────────────────────────────── */
+
+bool actor_watch_fd(runtime_t *rt, int fd, uint32_t events);
+bool actor_unwatch_fd(runtime_t *rt, int fd);
+
+/* ── Name registry API ─────────────────────────────────────────────── */
+
+bool       actor_register_name(runtime_t *rt, const char *name, actor_id_t id);
+actor_id_t actor_lookup(runtime_t *rt, const char *name);
+
+/* ── Logging API ───────────────────────────────────────────────────── */
+
+void runtime_enable_logging(runtime_t *rt);
+void runtime_set_log_level(runtime_t *rt, int level);
+void actor_log(runtime_t *rt, int level, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+#endif /* MICROKERNEL_SERVICES_H */

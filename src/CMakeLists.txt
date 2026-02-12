@@ -6,10 +6,17 @@ add_library(microkernel STATIC
     runtime.c
     wire.c
     transport_unix.c
+    timer_linux.c
+    name_registry.c
+    log_actor.c
 )
 
 target_include_directories(microkernel PUBLIC
     ${PROJECT_SOURCE_DIR}/include
+)
+
+target_include_directories(microkernel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 find_package(Threads REQUIRED)
