@@ -109,3 +109,49 @@ size_t ws_frame_build_close(uint16_t code, const char *reason,
 
     return ws_frame_build(WS_OPCODE_CLOSE, true, payload, plen, out);
 }
+
+size_t ws_frame_build_unmasked(uint8_t opcode, bool fin,
+                               const uint8_t *payload, size_t payload_len,
+                               uint8_t *out) {
+    size_t pos = 0;
+
+    out[pos++] = (fin ? 0x80 : 0x00) | (opcode & 0x0F);
+
+    /* Server frames are unmasked */
+    if (payload_len < 126) {
+        out[pos++] = (uint8_t)payload_len;
+    } else if (payload_len <= 0xFFFF) {
+        out[pos++] = 126;
+        out[pos++] = (uint8_t)(payload_len >> 8);
+        out[pos++] = (uint8_t)(payload_len & 0xFF);
+    } else {
+        out[pos++] = 127;
+        for (int i = 7; i >= 0; i--) {
+            out[pos++] = (uint8_t)(payload_len >> (i * 8));
+        }
+    }
+
+    if (payload && payload_len > 0) {
+        memcpy(out + pos, payload, payload_len);
+        pos += payload_len;
+    }
+
+    return pos;
+}
+
+size_t ws_frame_build_close_unmasked(uint16_t code, const char *reason,
+                                     size_t reason_len, uint8_t *out) {
+    uint8_t payload[128];
+    size_t plen = 0;
+
+    payload[plen++] = (uint8_t)(code >> 8);
+    payload[plen++] = (uint8_t)(code & 0xFF);
+
+    if (reason && reason_len > 0) {
+        size_t copy = reason_len < sizeof(payload) - 2 ? reason_len : sizeof(payload) - 2;
+        memcpy(payload + plen, reason, copy);
+        plen += copy;
+    }
+
+    return ws_frame_build_unmasked(WS_OPCODE_CLOSE, true, payload, plen, out);
+}

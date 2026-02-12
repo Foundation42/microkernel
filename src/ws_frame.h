@@ -45,4 +45,14 @@ size_t ws_frame_build(uint8_t opcode, bool fin,
 size_t ws_frame_build_close(uint16_t code, const char *reason,
                             size_t reason_len, uint8_t *out);
 
+/* Build an unmasked server frame. Returns bytes written to out.
+   out must be at least payload_len + 10 bytes. */
+size_t ws_frame_build_unmasked(uint8_t opcode, bool fin,
+                               const uint8_t *payload, size_t payload_len,
+                               uint8_t *out);
+
+/* Build an unmasked close frame (server-side). */
+size_t ws_frame_build_close_unmasked(uint16_t code, const char *reason,
+                                     size_t reason_len, uint8_t *out);
+
 #endif /* WS_FRAME_H */

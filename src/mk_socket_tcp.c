@@ -88,3 +88,22 @@ mk_socket_t *mk_socket_tcp_connect(const char *host, uint16_t port) {
 
     return sock;
 }
+
+mk_socket_t *mk_socket_tcp_wrap(int fd) {
+    mk_socket_t *sock = calloc(1, sizeof(*sock));
+    tcp_socket_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!sock || !ctx) {
+        free(sock);
+        free(ctx);
+        return NULL;
+    }
+
+    ctx->fd = fd;
+    sock->read = tcp_read;
+    sock->write = tcp_write;
+    sock->close = tcp_close;
+    sock->get_fd = tcp_get_fd;
+    sock->ctx = ctx;
+
+    return sock;
+}

@@ -10,11 +10,14 @@
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 #define MAX_TRANSPORTS 16
 #define MAX_TIMERS      32
 #define MAX_FD_WATCHES  32
-#define MAX_POLL_FDS    (MAX_TRANSPORTS + MAX_TIMERS + MAX_FD_WATCHES + MAX_HTTP_CONNS)
+#define MAX_POLL_FDS    (MAX_TRANSPORTS + MAX_TIMERS + MAX_FD_WATCHES + MAX_HTTP_CONNS + MAX_HTTP_LISTENERS)
 
 /* ── Internal types ────────────────────────────────────────────────── */
 
@@ -22,7 +25,8 @@ typedef enum {
     POLL_SOURCE_TRANSPORT,
     POLL_SOURCE_TIMER,
     POLL_SOURCE_FD_WATCH,
-    POLL_SOURCE_HTTP
+    POLL_SOURCE_HTTP,
+    POLL_SOURCE_HTTP_LISTEN
 } poll_source_type_t;
 
 typedef struct {
@@ -66,6 +70,8 @@ struct runtime {
     /* Phase 3.5: HTTP connections */
     http_conn_t      http_conns[MAX_HTTP_CONNS];
     uint32_t         next_http_conn_id;   /* monotonic, starts at 1 */
+    /* Phase 5: HTTP listeners */
+    http_listener_t  http_listeners[MAX_HTTP_LISTENERS];
 };
 
 /* ── Initialization / teardown ──────────────────────────────────────── */
@@ -96,6 +102,11 @@ runtime_t *runtime_init(node_id_t node_id, size_t max_actors) {
     /* Phase 3.5: HTTP connections */
     rt->next_http_conn_id = 1;
 
+    /* Phase 5: HTTP listeners */
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        rt->http_listeners[i].listen_fd = -1;
+    }
+
     return rt;
 }
 
@@ -125,6 +136,13 @@ void runtime_destroy(runtime_t *rt) {
     for (size_t i = 0; i < MAX_HTTP_CONNS; i++) {
         if (rt->http_conns[i].id != HTTP_CONN_ID_INVALID) {
             http_conn_free(&rt->http_conns[i]);
+        }
+    }
+    /* Clean up HTTP listeners */
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        if (rt->http_listeners[i].listen_fd >= 0) {
+            close(rt->http_listeners[i].listen_fd);
+            rt->http_listeners[i].listen_fd = -1;
         }
     }
     free(rt);
@@ -271,6 +289,8 @@ static void http_conn_free(http_conn_t *conn) {
     free(conn->headers_buf);
     free(conn->body_buf);
     free(conn->sse_data);
+    free(conn->request_method);
+    free(conn->request_path);
     memset(conn, 0, sizeof(*conn));
 }
 
@@ -306,6 +326,14 @@ static void cleanup_stopped(runtime_t *rt) {
                 if (rt->http_conns[h].id != HTTP_CONN_ID_INVALID &&
                     rt->http_conns[h].owner == id) {
                     http_conn_free(&rt->http_conns[h]);
+                }
+            }
+            /* Clean up HTTP listeners owned by this actor */
+            for (size_t l = 0; l < MAX_HTTP_LISTENERS; l++) {
+                if (rt->http_listeners[l].listen_fd >= 0 &&
+                    rt->http_listeners[l].owner == id) {
+                    close(rt->http_listeners[l].listen_fd);
+                    rt->http_listeners[l].listen_fd = -1;
                 }
             }
             /* Clean up name registry entries */
@@ -366,6 +394,14 @@ static size_t count_active_watches(runtime_t *rt) {
     size_t n = 0;
     for (size_t i = 0; i < MAX_FD_WATCHES; i++) {
         if (rt->fd_watches[i].fd >= 0) n++;
+    }
+    return n;
+}
+
+static size_t count_active_listeners(runtime_t *rt) {
+    size_t n = 0;
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        if (rt->http_listeners[i].listen_fd >= 0) n++;
     }
     return n;
 }
@@ -433,9 +469,27 @@ static bool poll_and_dispatch(runtime_t *rt, int timeout_ms) {
 
         int sock_fd = hc->sock->get_fd(hc->sock);
         fds[nfds].fd = sock_fd;
-        fds[nfds].events = (hc->state == HTTP_STATE_SENDING) ? POLLOUT : POLLIN;
+        short events;
+        if (hc->state == HTTP_STATE_SENDING ||
+            hc->state == HTTP_STATE_SRV_SENDING) {
+            events = POLLOUT;
+        } else {
+            events = POLLIN;
+        }
+        fds[nfds].events = events;
         fds[nfds].revents = 0;
         sources[nfds].type = POLL_SOURCE_HTTP;
+        sources[nfds].idx = i;
+        nfds++;
+    }
+
+    /* Add HTTP listener FDs */
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        if (rt->http_listeners[i].listen_fd < 0) continue;
+        fds[nfds].fd = rt->http_listeners[i].listen_fd;
+        fds[nfds].events = POLLIN;
+        fds[nfds].revents = 0;
+        sources[nfds].type = POLL_SOURCE_HTTP_LISTEN;
         sources[nfds].idx = i;
         nfds++;
     }
@@ -518,6 +572,45 @@ static bool poll_and_dispatch(runtime_t *rt, int timeout_ms) {
             dispatched = true;
             break;
         }
+        case POLL_SOURCE_HTTP_LISTEN: {
+            http_listener_t *lis = &rt->http_listeners[sources[n].idx];
+            if (lis->listen_fd < 0) break;
+
+            int client_fd = accept(lis->listen_fd, NULL, NULL);
+            if (client_fd < 0) break;
+
+            /* Set non-blocking */
+            int flags = fcntl(client_fd, F_GETFL, 0);
+            if (flags >= 0) fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
+            mk_socket_t *sock = mk_socket_tcp_wrap(client_fd);
+            if (!sock) { close(client_fd); break; }
+
+            /* Allocate connection from shared pool */
+            http_conn_t *hc = NULL;
+            for (size_t ci = 0; ci < MAX_HTTP_CONNS; ci++) {
+                if (rt->http_conns[ci].id == HTTP_CONN_ID_INVALID) {
+                    hc = &rt->http_conns[ci];
+                    break;
+                }
+            }
+            if (!hc) {
+                sock->close(sock);
+                break;
+            }
+
+            memset(hc, 0, sizeof(*hc));
+            hc->id = rt->next_http_conn_id++;
+            hc->state = HTTP_STATE_SRV_RECV_REQUEST;
+            hc->conn_type = HTTP_CONN_SERVER;
+            hc->owner = lis->owner;
+            hc->sock = sock;
+            hc->is_server = true;
+            hc->content_length = -1;
+
+            dispatched = true;
+            break;
+        }
         }
     }
 
@@ -538,7 +631,8 @@ void runtime_run(runtime_t *rt) {
         bool has_io = (rt->transport_count > 0) ||
                       (count_active_timers(rt) > 0) ||
                       (count_active_watches(rt) > 0) ||
-                      (count_active_http_conns(rt) > 0);
+                      (count_active_http_conns(rt) > 0) ||
+                      (count_active_listeners(rt) > 0);
 
         if (has_io) {
             /* Non-blocking poll for events */
@@ -664,4 +758,10 @@ size_t runtime_get_max_http_conns(void) {
 
 uint32_t runtime_alloc_http_conn_id(runtime_t *rt) {
     return rt->next_http_conn_id++;
+}
+
+/* ── HTTP listener accessors (used by http_conn.c) ─────────────────── */
+
+http_listener_t *runtime_get_http_listeners(runtime_t *rt) {
+    return rt->http_listeners;
 }

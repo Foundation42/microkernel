@@ -71,6 +71,34 @@ static inline const void *ws_message_data(const ws_message_payload_t *p) {
     return (const void *)(p + 1);
 }
 
+/* ── HTTP request payload (MSG_HTTP_REQUEST) — server-side ────────── */
+
+typedef struct {
+    http_conn_id_t conn_id;
+    size_t method_size;    /* includes \0 */
+    size_t path_size;      /* includes \0 */
+    size_t headers_size;   /* packed "Key: Value\0" pairs */
+    size_t body_size;
+    /* followed by: [method\0][path\0][packed headers][body] */
+} http_request_payload_t;
+
+static inline const char *http_request_method(const http_request_payload_t *p) {
+    return (const char *)(p + 1);
+}
+
+static inline const char *http_request_path(const http_request_payload_t *p) {
+    return (const char *)(p + 1) + p->method_size;
+}
+
+static inline const char *http_request_headers(const http_request_payload_t *p) {
+    return (const char *)(p + 1) + p->method_size + p->path_size;
+}
+
+static inline const void *http_request_body(const http_request_payload_t *p) {
+    return (const uint8_t *)(p + 1) + p->method_size + p->path_size +
+           p->headers_size;
+}
+
 /* ── Actor-facing APIs ────────────────────────────────────────────── */
 
 http_conn_id_t actor_http_fetch(runtime_t *rt, const char *method,
@@ -90,5 +118,21 @@ bool actor_ws_close(runtime_t *rt, http_conn_id_t id,
                     uint16_t code, const char *reason);
 
 void actor_http_close(runtime_t *rt, http_conn_id_t id);
+
+/* ── Server-side APIs (Phase 5) ──────────────────────────────────── */
+
+bool actor_http_listen(runtime_t *rt, uint16_t port);
+bool actor_http_unlisten(runtime_t *rt, uint16_t port);
+
+bool actor_http_respond(runtime_t *rt, http_conn_id_t conn_id,
+                        int status_code,
+                        const char *const *headers, size_t n_headers,
+                        const void *body, size_t body_size);
+
+bool actor_sse_start(runtime_t *rt, http_conn_id_t conn_id);
+bool actor_sse_push(runtime_t *rt, http_conn_id_t conn_id,
+                    const char *event, const char *data, size_t data_size);
+
+bool actor_ws_accept(runtime_t *rt, http_conn_id_t conn_id);
 
 #endif /* MICROKERNEL_HTTP_H */

@@ -31,6 +31,12 @@ typedef enum {
     HTTP_STATE_BODY_CHUNKED,
     HTTP_STATE_BODY_STREAM,     /* SSE */
     HTTP_STATE_WS_ACTIVE,
+    /* Server-side states */
+    HTTP_STATE_SRV_RECV_REQUEST,
+    HTTP_STATE_SRV_RECV_HEADERS,
+    HTTP_STATE_SRV_RECV_BODY,
+    HTTP_STATE_SRV_SENDING,
+    HTTP_STATE_SRV_SSE_ACTIVE,
     HTTP_STATE_DONE,
     HTTP_STATE_ERROR
 } http_state_t;
@@ -38,7 +44,10 @@ typedef enum {
 typedef enum {
     HTTP_CONN_HTTP,
     HTTP_CONN_SSE,
-    HTTP_CONN_WS
+    HTTP_CONN_WS,
+    HTTP_CONN_SERVER,
+    HTTP_CONN_SERVER_SSE,
+    HTTP_CONN_SERVER_WS
 } http_conn_type_t;
 
 #define HTTP_READ_BUF_SIZE 8192
@@ -88,7 +97,22 @@ typedef struct {
 
     /* WebSocket state */
     char             ws_accept_key[29]; /* expected Sec-WebSocket-Accept */
+
+    /* Server-side fields */
+    bool             is_server;
+    char            *request_method;
+    char            *request_path;
 } http_conn_t;
+
+/* ── HTTP listener (server-side) ──────────────────────────────────── */
+
+#define MAX_HTTP_LISTENERS 8
+
+typedef struct {
+    int         listen_fd;   /* -1 = unused */
+    uint16_t    port;
+    actor_id_t  owner;
+} http_listener_t;
 
 /* ── Accessors for runtime internals (defined in runtime.c) ────────── */
 
@@ -108,6 +132,9 @@ size_t         runtime_get_name_registry_size(void);
 http_conn_t   *runtime_get_http_conns(runtime_t *rt);
 size_t         runtime_get_max_http_conns(void);
 uint32_t       runtime_alloc_http_conn_id(runtime_t *rt);
+
+/* Phase 5: HTTP listener accessors */
+http_listener_t *runtime_get_http_listeners(runtime_t *rt);
 
 /* Deliver a message to a local actor (used by http_conn.c) */
 bool runtime_deliver_msg(runtime_t *rt, actor_id_t dest, msg_type_t type,

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "microkernel/http.h"
 #include "microkernel/mk_socket.h"
 #include "microkernel/message.h"
@@ -14,6 +15,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <poll.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ── Buffer helpers ────────────────────────────────────────────────── */
 
@@ -611,6 +616,176 @@ static bool process_sse_data(http_conn_t *conn, runtime_t *rt) {
     return false;
 }
 
+/* ── Server-side: request line parsing ──────────────────────────────── */
+
+static bool parse_request_line(http_conn_t *conn) {
+    ssize_t crlf = find_crlf(conn);
+    if (crlf < 0) return false;
+
+    /* Parse "METHOD /path HTTP/1.x\r\n" */
+    char *line = (char *)conn->read_buf;
+
+    /* Find method */
+    char *sp1 = memchr(line, ' ', (size_t)crlf);
+    if (!sp1) { conn->state = HTTP_STATE_ERROR; return false; }
+
+    size_t method_len = (size_t)(sp1 - line);
+    conn->request_method = strndup(line, method_len);
+
+    /* Find path */
+    char *path_start = sp1 + 1;
+    char *sp2 = memchr(path_start, ' ', (size_t)(line + crlf - path_start));
+    if (!sp2) { conn->state = HTTP_STATE_ERROR; return false; }
+
+    size_t path_len = (size_t)(sp2 - path_start);
+    conn->request_path = strndup(path_start, path_len);
+
+    buf_consume(conn, (size_t)crlf + 2);
+    conn->state = HTTP_STATE_SRV_RECV_HEADERS;
+    conn->content_length = -1;
+    conn->chunked = false;
+    conn->upgrade_ws = false;
+    return true;
+}
+
+/* ── Server-side: header parsing ───────────────────────────────────── */
+
+static void deliver_http_request(http_conn_t *conn, runtime_t *rt) {
+    size_t method_size = strlen(conn->request_method) + 1;
+    size_t path_size = strlen(conn->request_path) + 1;
+    size_t total = sizeof(http_request_payload_t) + method_size + path_size +
+                   conn->headers_size + conn->body_size;
+
+    uint8_t *buf = malloc(total);
+    if (!buf) return;
+
+    http_request_payload_t *p = (http_request_payload_t *)buf;
+    p->conn_id = conn->id;
+    p->method_size = method_size;
+    p->path_size = path_size;
+    p->headers_size = conn->headers_size;
+    p->body_size = conn->body_size;
+
+    uint8_t *dst = buf + sizeof(*p);
+    memcpy(dst, conn->request_method, method_size);
+    dst += method_size;
+    memcpy(dst, conn->request_path, path_size);
+    dst += path_size;
+    if (conn->headers_buf && conn->headers_size > 0)
+        memcpy(dst, conn->headers_buf, conn->headers_size);
+    dst += conn->headers_size;
+    if (conn->body_buf && conn->body_size > 0)
+        memcpy(dst, conn->body_buf, conn->body_size);
+
+    runtime_deliver_msg(rt, conn->owner, MSG_HTTP_REQUEST, buf, total);
+    free(buf);
+
+    /* Park connection — don't free request data yet, actor may need conn_id */
+    conn->state = HTTP_STATE_IDLE;
+}
+
+static bool parse_server_header_line(http_conn_t *conn, runtime_t *rt) {
+    ssize_t crlf = find_crlf(conn);
+    if (crlf < 0) return false;
+
+    if (crlf == 0) {
+        /* Empty line = end of headers */
+        buf_consume(conn, 2);
+
+        if (conn->content_length > 0 || conn->chunked) {
+            conn->state = HTTP_STATE_SRV_RECV_BODY;
+        } else {
+            deliver_http_request(conn, rt);
+        }
+        return true;
+    }
+
+    /* Parse header line */
+    char *line = (char *)conn->read_buf;
+    char *colon = memchr(line, ':', (size_t)crlf);
+
+    if (colon) {
+        size_t name_len = (size_t)(colon - line);
+
+        char *val = colon + 1;
+        while (val < line + crlf && *val == ' ') val++;
+        size_t val_len = (size_t)(line + crlf - val);
+
+        if (name_len == 14 && strncasecmp(line, "Content-Length", 14) == 0) {
+            conn->content_length = strtol(val, NULL, 10);
+        } else if (name_len == 17 &&
+                   strncasecmp(line, "Transfer-Encoding", 17) == 0) {
+            if (val_len >= 7 && strncasecmp(val, "chunked", 7) == 0)
+                conn->chunked = true;
+        } else if (name_len == 7 &&
+                   strncasecmp(line, "Upgrade", 7) == 0) {
+            if (val_len >= 9 && strncasecmp(val, "websocket", 9) == 0)
+                conn->upgrade_ws = true;
+        } else if (name_len == 17 &&
+                   strncasecmp(line, "Sec-WebSocket-Key", 17) == 0) {
+            /* Compute accept key for server-side WS */
+            static const char *ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+            char concat[128];
+            size_t copy_len = val_len < 64 ? val_len : 64;
+            char key_str[65];
+            memcpy(key_str, val, copy_len);
+            key_str[copy_len] = '\0';
+            snprintf(concat, sizeof(concat), "%s%s", key_str, ws_guid);
+            uint8_t sha1_hash[20];
+            sha1((const uint8_t *)concat, strlen(concat), sha1_hash);
+            base64_encode(sha1_hash, 20, conn->ws_accept_key);
+            conn->upgrade_ws = true;
+        }
+
+        /* Accumulate header */
+        dyn_append((uint8_t **)&conn->headers_buf, &conn->headers_size,
+                   &conn->headers_cap, line, (size_t)crlf);
+        char nul = '\0';
+        dyn_append((uint8_t **)&conn->headers_buf, &conn->headers_size,
+                   &conn->headers_cap, &nul, 1);
+    }
+
+    buf_consume(conn, (size_t)crlf + 2);
+    return true;
+}
+
+/* ── Server-side: body reading ─────────────────────────────────────── */
+
+static bool consume_server_body(http_conn_t *conn, runtime_t *rt) {
+    if (conn->read_len == 0) return false;
+
+    size_t avail = conn->read_len;
+
+    if (conn->content_length >= 0) {
+        size_t remaining = (size_t)conn->content_length - conn->body_size;
+        if (avail > remaining) avail = remaining;
+    }
+
+    if (avail > 0) {
+        dyn_append(&conn->body_buf, &conn->body_size, &conn->body_cap,
+                   conn->read_buf, avail);
+        buf_consume(conn, avail);
+    }
+
+    if (conn->content_length >= 0 &&
+        conn->body_size >= (size_t)conn->content_length) {
+        deliver_http_request(conn, rt);
+    }
+
+    return avail > 0;
+}
+
+/* ── Server-side: connection closed delivery ───────────────────────── */
+
+static void deliver_conn_closed(http_conn_t *conn, runtime_t *rt) {
+    ws_status_payload_t payload = {
+        .conn_id = conn->id,
+        .close_code = 0
+    };
+    runtime_deliver_msg(rt, conn->owner, MSG_HTTP_CONN_CLOSED,
+                        &payload, sizeof(payload));
+}
+
 /* ── WebSocket data processing ─────────────────────────────────────── */
 
 static bool send_ws_frame(http_conn_t *conn, uint8_t opcode,
@@ -627,7 +802,11 @@ static bool send_ws_frame(http_conn_t *conn, uint8_t opcode,
         buf = frame;
     }
 
-    size_t frame_size = ws_frame_build(opcode, true, payload, len, buf);
+    size_t frame_size;
+    if (conn->is_server)
+        frame_size = ws_frame_build_unmasked(opcode, true, payload, len, buf);
+    else
+        frame_size = ws_frame_build(opcode, true, payload, len, buf);
 
     /* Blocking write */
     size_t written = 0;
@@ -688,7 +867,11 @@ static bool process_ws_data(http_conn_t *conn, runtime_t *rt) {
         }
         /* Send close response */
         uint8_t close_frame[128];
-        size_t close_len = ws_frame_build_close(code, NULL, 0, close_frame);
+        size_t close_len;
+        if (conn->is_server)
+            close_len = ws_frame_build_close_unmasked(code, NULL, 0, close_frame);
+        else
+            close_len = ws_frame_build_close(code, NULL, 0, close_frame);
         conn->sock->write(conn->sock, close_frame, close_len);
         conn->state = HTTP_STATE_DONE;
         deliver_ws_closed(conn, rt, code);
@@ -716,8 +899,10 @@ void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt) {
     if (conn->state == HTTP_STATE_DONE || conn->state == HTTP_STATE_ERROR)
         return;
 
-    /* Handle POLLOUT for sending request */
-    if ((revents & POLLOUT) && conn->state == HTTP_STATE_SENDING) {
+    /* Handle POLLOUT for sending (client request or server response) */
+    if ((revents & POLLOUT) &&
+        (conn->state == HTTP_STATE_SENDING ||
+         conn->state == HTTP_STATE_SRV_SENDING)) {
         while (conn->send_pos < conn->send_size) {
             ssize_t n = conn->sock->write(conn->sock,
                                            conn->send_buf + conn->send_pos,
@@ -731,12 +916,32 @@ void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt) {
                 return;
             }
         }
-        /* Request fully sent */
+        /* Fully sent */
         free(conn->send_buf);
         conn->send_buf = NULL;
         conn->send_size = 0;
         conn->send_pos = 0;
-        conn->state = HTTP_STATE_RECV_STATUS;
+
+        if (conn->state == HTTP_STATE_SENDING) {
+            conn->state = HTTP_STATE_RECV_STATUS;
+        } else {
+            /* SRV_SENDING complete — next state depends on conn_type */
+            switch (conn->conn_type) {
+            case HTTP_CONN_SERVER:
+                conn->state = HTTP_STATE_DONE;
+                break;
+            case HTTP_CONN_SERVER_SSE:
+                conn->state = HTTP_STATE_SRV_SSE_ACTIVE;
+                break;
+            case HTTP_CONN_SERVER_WS:
+                conn->state = HTTP_STATE_WS_ACTIVE;
+                deliver_ws_open(conn, rt);
+                break;
+            default:
+                conn->state = HTTP_STATE_DONE;
+                break;
+            }
+        }
     }
 
     /* Handle POLLIN for receiving */
@@ -764,6 +969,15 @@ void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt) {
                 } else if (conn->state == HTTP_STATE_WS_ACTIVE) {
                     conn->state = HTTP_STATE_DONE;
                     deliver_ws_closed(conn, rt, 1006);
+                    return;
+                } else if (conn->state == HTTP_STATE_SRV_SSE_ACTIVE) {
+                    conn->state = HTTP_STATE_DONE;
+                    deliver_conn_closed(conn, rt);
+                    return;
+                } else if (conn->state == HTTP_STATE_SRV_RECV_REQUEST ||
+                           conn->state == HTTP_STATE_SRV_RECV_HEADERS ||
+                           conn->state == HTTP_STATE_SRV_RECV_BODY) {
+                    conn->state = HTTP_STATE_DONE;
                     return;
                 } else {
                     conn_error(conn, rt, "unexpected EOF");
@@ -797,6 +1011,20 @@ void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt) {
                 break;
             case HTTP_STATE_WS_ACTIVE:
                 progress = process_ws_data(conn, rt);
+                break;
+            case HTTP_STATE_SRV_RECV_REQUEST:
+                progress = parse_request_line(conn);
+                break;
+            case HTTP_STATE_SRV_RECV_HEADERS:
+                progress = parse_server_header_line(conn, rt);
+                break;
+            case HTTP_STATE_SRV_RECV_BODY:
+                progress = consume_server_body(conn, rt);
+                break;
+            case HTTP_STATE_SRV_SSE_ACTIVE:
+                /* Only here to detect client disconnect; data is irrelevant */
+                conn->read_len = 0;
+                progress = false;
                 break;
             default:
                 progress = false;
@@ -931,6 +1159,290 @@ http_conn_id_t actor_ws_connect(runtime_t *rt, const char *url) {
     return conn->id;
 }
 
+/* ── HTTP status reason helper ──────────────────────────────────────── */
+
+static const char *http_status_reason(int code) {
+    switch (code) {
+    case 101: return "Switching Protocols";
+    case 200: return "OK";
+    case 201: return "Created";
+    case 204: return "No Content";
+    case 301: return "Moved Permanently";
+    case 302: return "Found";
+    case 304: return "Not Modified";
+    case 400: return "Bad Request";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 500: return "Internal Server Error";
+    default:  return "Unknown";
+    }
+}
+
+/* ── Server-side actor APIs ────────────────────────────────────────── */
+
+bool actor_http_listen(runtime_t *rt, uint16_t port) {
+    actor_id_t owner = runtime_current_actor_id(rt);
+    if (owner == ACTOR_ID_INVALID) return false;
+
+    http_listener_t *listeners = runtime_get_http_listeners(rt);
+
+    /* Find free slot */
+    http_listener_t *slot = NULL;
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        if (listeners[i].listen_fd < 0) {
+            slot = &listeners[i];
+            break;
+        }
+    }
+    if (!slot) return false;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return false;
+    }
+
+    if (listen(fd, 16) < 0) {
+        close(fd);
+        return false;
+    }
+
+    /* Set non-blocking */
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    slot->listen_fd = fd;
+    slot->port = port;
+    slot->owner = owner;
+    return true;
+}
+
+bool actor_http_unlisten(runtime_t *rt, uint16_t port) {
+    actor_id_t owner = runtime_current_actor_id(rt);
+    if (owner == ACTOR_ID_INVALID) return false;
+
+    http_listener_t *listeners = runtime_get_http_listeners(rt);
+    for (size_t i = 0; i < MAX_HTTP_LISTENERS; i++) {
+        if (listeners[i].listen_fd >= 0 &&
+            listeners[i].port == port &&
+            listeners[i].owner == owner) {
+            close(listeners[i].listen_fd);
+            listeners[i].listen_fd = -1;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool actor_http_respond(runtime_t *rt, http_conn_id_t conn_id,
+                        int status_code,
+                        const char *const *headers, size_t n_headers,
+                        const void *body, size_t body_size) {
+    http_conn_t *conns = runtime_get_http_conns(rt);
+    size_t max = runtime_get_max_http_conns();
+    http_conn_t *conn = NULL;
+    for (size_t i = 0; i < max; i++) {
+        if (conns[i].id == conn_id) { conn = &conns[i]; break; }
+    }
+    if (!conn || conn->state != HTTP_STATE_IDLE || !conn->is_server) return false;
+
+    /* Build response: "HTTP/1.1 STATUS Reason\r\n" + headers + body */
+    size_t cap = 256 + body_size;
+    for (size_t i = 0; i < n_headers; i++)
+        cap += strlen(headers[i]) + 4;
+
+    uint8_t *buf = malloc(cap);
+    if (!buf) return false;
+
+    int pos = snprintf((char *)buf, cap, "HTTP/1.1 %d %s\r\n",
+                       status_code, http_status_reason(status_code));
+
+    for (size_t i = 0; i < n_headers; i++) {
+        pos += snprintf((char *)buf + pos, cap - (size_t)pos,
+                        "%s\r\n", headers[i]);
+    }
+
+    pos += snprintf((char *)buf + pos, cap - (size_t)pos,
+                    "Content-Length: %zu\r\n"
+                    "Connection: close\r\n"
+                    "\r\n", body_size);
+
+    if (body && body_size > 0) {
+        memcpy(buf + pos, body, body_size);
+        pos += (int)body_size;
+    }
+
+    /* Blocking write — ensures response is sent before actor can stop */
+    size_t total = (size_t)pos;
+    size_t written = 0;
+    while (written < total) {
+        ssize_t n = conn->sock->write(conn->sock,
+                                       buf + written, total - written);
+        if (n > 0) {
+            written += (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        } else {
+            free(buf);
+            conn->state = HTTP_STATE_DONE;
+            return false;
+        }
+    }
+
+    free(buf);
+    conn->state = HTTP_STATE_DONE;
+    return true;
+}
+
+bool actor_sse_start(runtime_t *rt, http_conn_id_t conn_id) {
+    http_conn_t *conns = runtime_get_http_conns(rt);
+    size_t max = runtime_get_max_http_conns();
+    http_conn_t *conn = NULL;
+    for (size_t i = 0; i < max; i++) {
+        if (conns[i].id == conn_id) { conn = &conns[i]; break; }
+    }
+    if (!conn || conn->state != HTTP_STATE_IDLE || !conn->is_server) return false;
+
+    const char *resp = "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: text/event-stream\r\n"
+                       "Cache-Control: no-cache\r\n"
+                       "Connection: keep-alive\r\n"
+                       "\r\n";
+
+    size_t len = strlen(resp);
+
+    /* Blocking write of SSE headers */
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = conn->sock->write(conn->sock,
+                                       (const uint8_t *)resp + written,
+                                       len - written);
+        if (n > 0) {
+            written += (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        } else {
+            conn->state = HTTP_STATE_DONE;
+            return false;
+        }
+    }
+
+    conn->conn_type = HTTP_CONN_SERVER_SSE;
+    conn->state = HTTP_STATE_SRV_SSE_ACTIVE;
+    return true;
+}
+
+bool actor_sse_push(runtime_t *rt, http_conn_id_t conn_id,
+                    const char *event, const char *data, size_t data_size) {
+    http_conn_t *conns = runtime_get_http_conns(rt);
+    size_t max = runtime_get_max_http_conns();
+    http_conn_t *conn = NULL;
+    for (size_t i = 0; i < max; i++) {
+        if (conns[i].id == conn_id) { conn = &conns[i]; break; }
+    }
+    if (!conn || conn->state != HTTP_STATE_SRV_SSE_ACTIVE || !conn->is_server)
+        return false;
+
+    /* Build "event: NAME\ndata: DATA\n\n" */
+    size_t event_len = event ? strlen(event) : 0;
+    size_t buf_size = 32 + event_len + data_size;
+    char *buf = malloc(buf_size);
+    if (!buf) return false;
+
+    int pos = 0;
+    if (event && event_len > 0) {
+        pos += snprintf(buf + pos, buf_size - (size_t)pos,
+                        "event: %s\n", event);
+    }
+    pos += snprintf(buf + pos, buf_size - (size_t)pos, "data: ");
+    if (data && data_size > 0) {
+        memcpy(buf + pos, data, data_size);
+        pos += (int)data_size;
+    }
+    buf[pos++] = '\n';
+    buf[pos++] = '\n';
+
+    /* Blocking write */
+    size_t written = 0;
+    size_t total = (size_t)pos;
+    while (written < total) {
+        ssize_t n = conn->sock->write(conn->sock,
+                                       (uint8_t *)buf + written,
+                                       total - written);
+        if (n > 0) {
+            written += (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        } else {
+            free(buf);
+            return false;
+        }
+    }
+
+    free(buf);
+    return true;
+}
+
+bool actor_ws_accept(runtime_t *rt, http_conn_id_t conn_id) {
+    http_conn_t *conns = runtime_get_http_conns(rt);
+    size_t max = runtime_get_max_http_conns();
+    http_conn_t *conn = NULL;
+    for (size_t i = 0; i < max; i++) {
+        if (conns[i].id == conn_id) { conn = &conns[i]; break; }
+    }
+    if (!conn || conn->state != HTTP_STATE_IDLE || !conn->is_server) return false;
+    if (!conn->upgrade_ws || conn->ws_accept_key[0] == '\0') return false;
+
+    char resp[512];
+    int len = snprintf(resp, sizeof(resp),
+                       "HTTP/1.1 101 Switching Protocols\r\n"
+                       "Upgrade: websocket\r\n"
+                       "Connection: Upgrade\r\n"
+                       "Sec-WebSocket-Accept: %s\r\n"
+                       "\r\n", conn->ws_accept_key);
+
+    /* Blocking write of upgrade response */
+    size_t total = (size_t)len;
+    size_t written = 0;
+    while (written < total) {
+        ssize_t n = conn->sock->write(conn->sock,
+                                       (const uint8_t *)resp + written,
+                                       total - written);
+        if (n > 0) {
+            written += (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        } else {
+            conn->state = HTTP_STATE_DONE;
+            return false;
+        }
+    }
+
+    conn->conn_type = HTTP_CONN_SERVER_WS;
+    conn->state = HTTP_STATE_WS_ACTIVE;
+
+    /* Deliver MSG_WS_OPEN to the owning actor */
+    ws_status_payload_t ws_payload = {
+        .conn_id = conn->id,
+        .close_code = 0
+    };
+    runtime_deliver_msg(rt, conn->owner, MSG_WS_OPEN,
+                        &ws_payload, sizeof(ws_payload));
+    return true;
+}
+
 static http_conn_t *find_conn(runtime_t *rt, http_conn_id_t id) {
     http_conn_t *conns = runtime_get_http_conns(rt);
     size_t max = runtime_get_max_http_conns();
@@ -961,7 +1473,11 @@ bool actor_ws_close(runtime_t *rt, http_conn_id_t id,
 
     uint8_t frame[128];
     size_t reason_len = reason ? strlen(reason) : 0;
-    size_t frame_size = ws_frame_build_close(code, reason, reason_len, frame);
+    size_t frame_size;
+    if (conn->is_server)
+        frame_size = ws_frame_build_close_unmasked(code, reason, reason_len, frame);
+    else
+        frame_size = ws_frame_build_close(code, reason, reason_len, frame);
 
     /* Blocking write of close frame */
     size_t written = 0;
@@ -993,5 +1509,9 @@ void actor_http_close(runtime_t *rt, http_conn_id_t id) {
     conn->body_buf = NULL;
     free(conn->sse_data);
     conn->sse_data = NULL;
+    free(conn->request_method);
+    conn->request_method = NULL;
+    free(conn->request_path);
+    conn->request_path = NULL;
     memset(conn, 0, sizeof(*conn));
 }

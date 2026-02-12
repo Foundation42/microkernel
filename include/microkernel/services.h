@@ -20,6 +20,11 @@
 #define MSG_WS_CLOSED     ((msg_type_t)0xFF00000B)
 #define MSG_WS_ERROR      ((msg_type_t)0xFF00000C)
 
+/* Phase 5: Server-side HTTP message types */
+#define MSG_HTTP_REQUEST      ((msg_type_t)0xFF00000D)
+#define MSG_HTTP_LISTEN_ERROR ((msg_type_t)0xFF00000E)
+#define MSG_HTTP_CONN_CLOSED  ((msg_type_t)0xFF00000F)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {

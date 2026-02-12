@@ -20,4 +20,8 @@ struct mk_socket {
    Returns NULL on failure. Caller must call sock->close(sock). */
 mk_socket_t *mk_socket_tcp_connect(const char *host, uint16_t port);
 
+/* Wrap an already-connected, already-nonblocking fd into mk_socket_t.
+   Used by the server accept path. Returns NULL on alloc failure. */
+mk_socket_t *mk_socket_tcp_wrap(int fd);
+
 #endif /* MICROKERNEL_MK_SOCKET_H */
