@@ -6,6 +6,8 @@ add_library(microkernel STATIC
     runtime.c
     wire.c
     transport_unix.c
+    transport_tcp.c
+    transport_udp.c
     timer_linux.c
     name_registry.c
     log_actor.c

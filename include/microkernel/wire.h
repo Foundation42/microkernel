@@ -39,4 +39,10 @@ void *wire_serialize(const message_t *msg, size_t *out_size);
    Returns NULL if buf_size is too small or allocation fails. */
 message_t *wire_deserialize(const void *buf, size_t buf_size);
 
+/* Network byte order variants for TCP/UDP (cross-machine).
+   Same semantics as wire_serialize/wire_deserialize but encode
+   multi-byte header fields in big-endian order. */
+void *wire_serialize_net(const message_t *msg, size_t *out_size);
+message_t *wire_deserialize_net(const void *buf, size_t buf_size);
+
 #endif /* MICROKERNEL_WIRE_H */
