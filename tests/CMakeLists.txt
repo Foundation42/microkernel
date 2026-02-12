@@ -1,0 +1,12 @@
+function(add_microkernel_test name)
+    add_executable(${name} ${name}.c)
+    target_link_libraries(${name} PRIVATE microkernel)
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_microkernel_test(test_message)
+add_microkernel_test(test_mailbox)
+add_microkernel_test(test_scheduler)
+add_microkernel_test(test_runtime)
+add_microkernel_test(test_pingpong)
