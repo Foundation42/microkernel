@@ -21,6 +21,9 @@ bool actor_send(runtime_t *rt, actor_id_t dest, msg_type_t type,
 actor_id_t actor_self(runtime_t *rt);
 void      *actor_state(runtime_t *rt);
 
+/* Transport */
+bool runtime_add_transport(runtime_t *rt, transport_t *transport);
+
 /* Execution */
 void runtime_run(runtime_t *rt);   /* Blocking event loop */
 void runtime_step(runtime_t *rt);  /* Single scheduling iteration */

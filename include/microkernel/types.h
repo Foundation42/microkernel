@@ -39,6 +39,7 @@ typedef struct mailbox mailbox_t;
 typedef struct actor actor_t;
 typedef struct scheduler scheduler_t;
 typedef struct runtime runtime_t;
+typedef struct transport transport_t;
 
 /* Behavior function: returns true to continue, false to stop */
 typedef bool (*actor_behavior_fn)(runtime_t *rt, actor_t *self,

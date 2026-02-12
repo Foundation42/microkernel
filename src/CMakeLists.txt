@@ -4,6 +4,8 @@ add_library(microkernel STATIC
     actor.c
     scheduler.c
     runtime.c
+    wire.c
+    transport_unix.c
 )
 
 target_include_directories(microkernel PUBLIC

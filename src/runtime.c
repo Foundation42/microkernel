@@ -3,8 +3,12 @@
 #include "microkernel/mailbox.h"
 #include "microkernel/message.h"
 #include "microkernel/scheduler.h"
+#include "microkernel/transport.h"
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
+
+#define MAX_TRANSPORTS 16
 
 struct runtime {
     node_id_t    node_id;
@@ -15,6 +19,9 @@ struct runtime {
     scheduler_t  scheduler;      /* embedded by value */
     actor_t     *current_actor;  /* set during behavior dispatch */
     bool         running;
+    /* Phase 2: transport table (sparse array indexed by node_id) */
+    transport_t *transports[MAX_TRANSPORTS];
+    size_t       transport_count;
 };
 
 /* ── Initialization / teardown ──────────────────────────────────────── */
@@ -44,6 +51,11 @@ void runtime_destroy(runtime_t *rt) {
         }
     }
     free(rt->actors);
+    for (size_t i = 0; i < MAX_TRANSPORTS; i++) {
+        if (rt->transports[i]) {
+            rt->transports[i]->destroy(rt->transports[i]);
+        }
+    }
     free(rt);
 }
 
@@ -78,7 +90,7 @@ void actor_stop(runtime_t *rt, actor_id_t id) {
     if (a) a->status = ACTOR_STOPPED;
 }
 
-/* ── Internal: look up an actor by id ───────────────────────────────── */
+/* ── Internal: look up a local actor by id ─────────────────────────── */
 
 static actor_t *lookup(runtime_t *rt, actor_id_t id) {
     uint32_t seq = actor_id_seq(id);
@@ -88,29 +100,69 @@ static actor_t *lookup(runtime_t *rt, actor_id_t id) {
     return a;
 }
 
+/* ── Internal: deliver a message to a local actor ──────────────────── */
+
+static bool deliver_local(runtime_t *rt, actor_id_t dest, message_t *msg) {
+    actor_t *target = lookup(rt, dest);
+    if (!target) return false;
+
+    if (!mailbox_enqueue(target->mailbox, msg)) return false;
+
+    if (target->status == ACTOR_IDLE) {
+        scheduler_enqueue(&rt->scheduler, target);
+    }
+    return true;
+}
+
 /* ── Messaging ──────────────────────────────────────────────────────── */
 
 bool actor_send(runtime_t *rt, actor_id_t dest, msg_type_t type,
                 const void *payload, size_t payload_size) {
-    actor_t *target = lookup(rt, dest);
-    if (!target) return false;
-
     actor_id_t source = rt->current_actor ? rt->current_actor->id
                                           : ACTOR_ID_INVALID;
+    node_id_t dest_node = actor_id_node(dest);
 
+    if (dest_node == rt->node_id) {
+        /* Local delivery */
+        actor_t *target = lookup(rt, dest);
+        if (!target) return false;
+
+        message_t *msg = message_create(source, dest, type,
+                                        payload, payload_size);
+        if (!msg) return false;
+
+        if (!mailbox_enqueue(target->mailbox, msg)) {
+            message_destroy(msg);
+            return false;
+        }
+
+        if (target->status == ACTOR_IDLE) {
+            scheduler_enqueue(&rt->scheduler, target);
+        }
+        return true;
+    }
+
+    /* Remote delivery via transport */
+    if (dest_node >= MAX_TRANSPORTS || !rt->transports[dest_node])
+        return false;
+
+    transport_t *tp = rt->transports[dest_node];
     message_t *msg = message_create(source, dest, type,
                                     payload, payload_size);
     if (!msg) return false;
 
-    if (!mailbox_enqueue(target->mailbox, msg)) {
-        message_destroy(msg);
-        return false;
-    }
+    bool ok = tp->send(tp, msg);
+    message_destroy(msg);
+    return ok;
+}
 
-    /* Schedule target if not already ready/running */
-    if (target->status == ACTOR_IDLE) {
-        scheduler_enqueue(&rt->scheduler, target);
-    }
+/* ── Transport ─────────────────────────────────────────────────────── */
+
+bool runtime_add_transport(runtime_t *rt, transport_t *transport) {
+    if (!rt || !transport) return false;
+    if (transport->peer_node >= MAX_TRANSPORTS) return false;
+    rt->transports[transport->peer_node] = transport;
+    rt->transport_count++;
     return true;
 }
 
@@ -171,14 +223,71 @@ void runtime_step(runtime_t *rt) {
     cleanup_stopped(rt);
 }
 
+/* ── Internal: poll transports for incoming messages ───────────────── */
+
+static bool poll_transports(runtime_t *rt) {
+    bool received = false;
+    for (size_t i = 0; i < MAX_TRANSPORTS; i++) {
+        transport_t *tp = rt->transports[i];
+        if (!tp) continue;
+
+        message_t *msg;
+        while ((msg = tp->recv(tp)) != NULL) {
+            if (!deliver_local(rt, msg->dest, msg)) {
+                message_destroy(msg);
+            }
+            received = true;
+        }
+    }
+    return received;
+}
+
+static void poll_wait(runtime_t *rt, int timeout_ms) {
+    struct pollfd fds[MAX_TRANSPORTS];
+    nfds_t nfds = 0;
+
+    for (size_t i = 0; i < MAX_TRANSPORTS; i++) {
+        transport_t *tp = rt->transports[i];
+        if (!tp || tp->fd < 0) continue;
+        fds[nfds].fd = tp->fd;
+        fds[nfds].events = POLLIN;
+        fds[nfds].revents = 0;
+        nfds++;
+    }
+
+    if (nfds > 0) {
+        poll(fds, nfds, timeout_ms);
+    }
+}
+
 void runtime_run(runtime_t *rt) {
     rt->running = true;
-    while (rt->running && (rt->actor_count > 0)) {
-        if (scheduler_is_empty(&rt->scheduler)) {
-            /* No actors ready — nothing to do, stop. */
-            break;
+    bool has_transports = (rt->transport_count > 0);
+
+    while (rt->running) {
+        /* Drain the scheduler */
+        while (rt->running && !scheduler_is_empty(&rt->scheduler)) {
+            runtime_step(rt);
         }
-        runtime_step(rt);
+
+        if (!rt->running) break;
+
+        if (has_transports) {
+            /* Poll transports for incoming messages */
+            bool received = poll_transports(rt);
+
+            if (!received && scheduler_is_empty(&rt->scheduler)) {
+                if (rt->actor_count == 0) break;
+                /* Block on transport FDs with timeout */
+                poll_wait(rt, 100);
+                poll_transports(rt);
+            }
+        } else {
+            /* Phase 1 behavior: no transports → exit when scheduler empty */
+            if (scheduler_is_empty(&rt->scheduler) || rt->actor_count == 0) {
+                break;
+            }
+        }
     }
     rt->running = false;
 }
