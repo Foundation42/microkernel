@@ -11,6 +11,12 @@ add_library(microkernel STATIC
     timer_linux.c
     name_registry.c
     log_actor.c
+    mk_socket_tcp.c
+    url_parse.c
+    sha1.c
+    base64.c
+    ws_frame.c
+    http_conn.c
 )
 
 target_include_directories(microkernel PUBLIC

@@ -3,6 +3,7 @@
 
 #include "microkernel/runtime.h"
 #include "microkernel/services.h"
+#include "microkernel/mk_socket.h"
 
 /* Internal types shared between runtime.c and service modules */
 
@@ -19,7 +20,78 @@ typedef struct {
     bool       occupied;
 } name_entry_t;
 
-/* Accessors for runtime internals (defined in runtime.c) */
+/* ── HTTP connection state machine ─────────────────────────────────── */
+
+typedef enum {
+    HTTP_STATE_IDLE,
+    HTTP_STATE_SENDING,
+    HTTP_STATE_RECV_STATUS,
+    HTTP_STATE_RECV_HEADERS,
+    HTTP_STATE_BODY_CONTENT,
+    HTTP_STATE_BODY_CHUNKED,
+    HTTP_STATE_BODY_STREAM,     /* SSE */
+    HTTP_STATE_WS_ACTIVE,
+    HTTP_STATE_DONE,
+    HTTP_STATE_ERROR
+} http_state_t;
+
+typedef enum {
+    HTTP_CONN_HTTP,
+    HTTP_CONN_SSE,
+    HTTP_CONN_WS
+} http_conn_type_t;
+
+#define HTTP_READ_BUF_SIZE 8192
+#define MAX_HTTP_CONNS 32
+
+typedef struct {
+    http_conn_id_t   id;          /* 0 = unused slot */
+    http_state_t     state;
+    http_conn_type_t conn_type;
+    actor_id_t       owner;
+    mk_socket_t     *sock;
+
+    /* Request buffer (SENDING state) */
+    uint8_t         *send_buf;
+    size_t           send_size;
+    size_t           send_pos;
+
+    /* Read buffer (sliding window) */
+    uint8_t          read_buf[HTTP_READ_BUF_SIZE];
+    size_t           read_len;    /* bytes of valid data from index 0 */
+
+    /* Response state */
+    int              status_code;
+    int64_t          content_length; /* -1 = unknown */
+    bool             chunked;
+    bool             upgrade_ws;
+
+    /* Headers accumulator: "Key: Value\0Key: Value\0" */
+    char            *headers_buf;
+    size_t           headers_size;
+    size_t           headers_cap;
+
+    /* Body accumulator */
+    uint8_t         *body_buf;
+    size_t           body_size;
+    size_t           body_cap;
+
+    /* Chunked transfer state */
+    size_t           chunk_remaining;
+    bool             in_chunk_data;
+
+    /* SSE state */
+    char             sse_event[256];
+    char            *sse_data;
+    size_t           sse_data_size;
+    size_t           sse_data_cap;
+
+    /* WebSocket state */
+    char             ws_accept_key[29]; /* expected Sec-WebSocket-Accept */
+} http_conn_t;
+
+/* ── Accessors for runtime internals (defined in runtime.c) ────────── */
+
 timer_entry_t *runtime_get_timers(runtime_t *rt);
 size_t         runtime_get_max_timers(void);
 uint32_t       runtime_alloc_timer_id(runtime_t *rt);
@@ -31,5 +103,17 @@ int            runtime_get_min_log_level(runtime_t *rt);
 
 name_entry_t  *runtime_get_name_registry(runtime_t *rt);
 size_t         runtime_get_name_registry_size(void);
+
+/* Phase 3.5: HTTP connection accessors */
+http_conn_t   *runtime_get_http_conns(runtime_t *rt);
+size_t         runtime_get_max_http_conns(void);
+uint32_t       runtime_alloc_http_conn_id(runtime_t *rt);
+
+/* Deliver a message to a local actor (used by http_conn.c) */
+bool runtime_deliver_msg(runtime_t *rt, actor_id_t dest, msg_type_t type,
+                         const void *payload, size_t payload_size);
+
+/* Drive an HTTP connection (called from runtime.c poll loop) */
+void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt);
 
 #endif /* RUNTIME_INTERNAL_H */

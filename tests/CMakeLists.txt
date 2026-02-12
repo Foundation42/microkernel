@@ -1,7 +1,10 @@
 function(add_microkernel_test name)
     add_executable(${name} ${name}.c)
     target_link_libraries(${name} PRIVATE microkernel)
-    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
+    )
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -21,3 +24,9 @@ add_microkernel_test(test_wire_net)
 add_microkernel_test(test_transport_tcp)
 add_microkernel_test(test_multinode_tcp)
 add_microkernel_test(test_transport_udp)
+add_microkernel_test(test_mk_socket)
+add_microkernel_test(test_url_parse)
+add_microkernel_test(test_http)
+add_microkernel_test(test_sse)
+add_microkernel_test(test_websocket)
+add_microkernel_test(test_http_runtime)

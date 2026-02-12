@@ -9,6 +9,17 @@
 #define MSG_FD_EVENT ((msg_type_t)0xFF000002)
 #define MSG_LOG      ((msg_type_t)0xFF000003)
 
+/* Phase 3.5: HTTP / SSE / WebSocket message types */
+#define MSG_HTTP_RESPONSE ((msg_type_t)0xFF000004)
+#define MSG_HTTP_ERROR    ((msg_type_t)0xFF000005)
+#define MSG_SSE_OPEN      ((msg_type_t)0xFF000006)
+#define MSG_SSE_EVENT     ((msg_type_t)0xFF000007)
+#define MSG_SSE_CLOSED    ((msg_type_t)0xFF000008)
+#define MSG_WS_OPEN       ((msg_type_t)0xFF000009)
+#define MSG_WS_MESSAGE    ((msg_type_t)0xFF00000A)
+#define MSG_WS_CLOSED     ((msg_type_t)0xFF00000B)
+#define MSG_WS_ERROR      ((msg_type_t)0xFF00000C)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {
