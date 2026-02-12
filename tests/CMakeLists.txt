@@ -30,3 +30,35 @@ add_microkernel_test(test_http)
 add_microkernel_test(test_sse)
 add_microkernel_test(test_websocket)
 add_microkernel_test(test_http_runtime)
+
+# ── Real-world tests (require network) ──────────────────────────────
+option(BUILD_REALWORLD_TESTS "Build tests requiring network" OFF)
+if(BUILD_REALWORLD_TESTS)
+    function(add_realworld_test name)
+        add_executable(${name} ${name}.c)
+        target_link_libraries(${name} PRIVATE microkernel)
+        target_include_directories(${name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/src
+        )
+    endfunction()
+
+    add_realworld_test(test_http_realworld)
+    add_realworld_test(test_ws_realworld)
+endif()
+
+# ── Benchmarks ──────────────────────────────────────────────────────
+option(BUILD_BENCHMARKS "Build benchmarks" OFF)
+if(BUILD_BENCHMARKS)
+    function(add_benchmark name)
+        add_executable(${name} ${name}.c)
+        target_link_libraries(${name} PRIVATE microkernel)
+        target_include_directories(${name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/src
+        )
+    endfunction()
+
+    add_benchmark(bench_http)
+    add_benchmark(bench_actor)
+endif()
