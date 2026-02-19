@@ -632,11 +632,189 @@ static bool test_wss_echo(void) {
     return ok;
 }
 
+/* ── Test 9: Multi-node distributed actors over TCP loopback ───────── */
+
+#define MN_PORT   19901
+#define MN_NODE_A 1
+#define MN_NODE_B 2
+#define MSG_PING  100
+#define MSG_PONG  101
+#define MN_ROUNDS 5
+
+typedef struct {
+    actor_id_t peer;
+    int count;
+    int target;
+} mn_state_t;
+
+/* Node A: receives MSG_PING, replies MSG_PONG, stops at target */
+static bool mn_node_a_behavior(runtime_t *rt, actor_t *self,
+                                message_t *msg, void *state) {
+    (void)self;
+    mn_state_t *s = state;
+
+    if (msg->type == MSG_PING) {
+        s->count++;
+        uint32_t val = (uint32_t)s->count;
+        actor_send(rt, s->peer, MSG_PONG, &val, sizeof(val));
+        if (s->count >= s->target) {
+            runtime_stop(rt);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Node B: sends initial MSG_PING, receives MSG_PONG, replies MSG_PING, stops at target */
+static bool mn_node_b_behavior(runtime_t *rt, actor_t *self,
+                                message_t *msg, void *state) {
+    (void)self;
+    mn_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        uint32_t val = 0;
+        actor_send(rt, s->peer, MSG_PING, &val, sizeof(val));
+        return true;
+    }
+
+    if (msg->type == MSG_PONG) {
+        s->count++;
+        if (s->count >= s->target) {
+            runtime_stop(rt);
+            return false;
+        }
+        uint32_t val = (uint32_t)s->count;
+        actor_send(rt, s->peer, MSG_PING, &val, sizeof(val));
+    }
+    return true;
+}
+
+static EventGroupHandle_t s_mn_event_group;
+#define MN_NODE_A_DONE BIT0
+#define MN_NODE_B_DONE BIT1
+
+typedef struct {
+    transport_t *tp;
+    mn_state_t  *state;
+} mn_task_arg_t;
+
+static void mn_node_a_task(void *arg) {
+    mn_task_arg_t *a = arg;
+
+    runtime_t *rt = runtime_init(MN_NODE_A, 8);
+    if (!rt) {
+        ESP_LOGE(TAG, "Node A: runtime_init failed");
+        a->state->count = -1;
+        xEventGroupSetBits(s_mn_event_group, MN_NODE_A_DONE);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    runtime_add_transport(rt, a->tp);
+
+    a->state->peer = actor_id_make(MN_NODE_B, 1);
+    a->state->target = MN_ROUNDS;
+    actor_spawn(rt, mn_node_a_behavior, a->state, NULL, 16);
+
+    ESP_LOGI(TAG, "Node A: running (waiting for ping)");
+    runtime_run(rt);
+
+    ESP_LOGI(TAG, "Node A: done (count=%d)", a->state->count);
+    runtime_destroy(rt);
+    xEventGroupSetBits(s_mn_event_group, MN_NODE_A_DONE);
+    vTaskDelete(NULL);
+}
+
+static void mn_node_b_task(void *arg) {
+    mn_task_arg_t *a = arg;
+
+    /* Let node A's listen socket be ready */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    transport_t *tp = transport_tcp_connect("127.0.0.1", MN_PORT, MN_NODE_A);
+    if (!tp) {
+        ESP_LOGE(TAG, "Node B: transport_tcp_connect failed");
+        a->state->count = -1;
+        xEventGroupSetBits(s_mn_event_group, MN_NODE_B_DONE);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    runtime_t *rt = runtime_init(MN_NODE_B, 8);
+    if (!rt) {
+        ESP_LOGE(TAG, "Node B: runtime_init failed");
+        tp->destroy(tp);
+        a->state->count = -1;
+        xEventGroupSetBits(s_mn_event_group, MN_NODE_B_DONE);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    runtime_add_transport(rt, tp);
+
+    a->state->peer = actor_id_make(MN_NODE_A, 1);
+    a->state->target = MN_ROUNDS;
+    actor_id_t id = actor_spawn(rt, mn_node_b_behavior, a->state, NULL, 16);
+
+    /* Bootstrap triggers initial MSG_PING */
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+
+    ESP_LOGI(TAG, "Node B: running (sending first ping)");
+    runtime_run(rt);
+
+    ESP_LOGI(TAG, "Node B: done (count=%d)", a->state->count);
+    runtime_destroy(rt);
+    xEventGroupSetBits(s_mn_event_group, MN_NODE_B_DONE);
+    vTaskDelete(NULL);
+}
+
+static bool test_multinode(void) {
+    ESP_LOGI(TAG, "=== Test 9: Multi-node distributed actors ===");
+
+    s_mn_event_group = xEventGroupCreate();
+
+    mn_state_t *state_a = calloc(1, sizeof(*state_a));
+    mn_state_t *state_b = calloc(1, sizeof(*state_b));
+
+    /* Bind listen socket before spawning tasks */
+    transport_t *srv_tp = transport_tcp_listen("0.0.0.0", MN_PORT, MN_NODE_B);
+    if (!srv_tp) {
+        ESP_LOGE(TAG, "transport_tcp_listen failed");
+        free(state_a);
+        free(state_b);
+        vEventGroupDelete(s_mn_event_group);
+        return false;
+    }
+
+    mn_task_arg_t arg_a = { .tp = srv_tp, .state = state_a };
+    mn_task_arg_t arg_b = { .tp = NULL,   .state = state_b };
+
+    xTaskCreate(mn_node_a_task, "mn_node_a", 4096, &arg_a, 5, NULL);
+    xTaskCreate(mn_node_b_task, "mn_node_b", 4096, &arg_b, 5, NULL);
+
+    EventBits_t bits = xEventGroupWaitBits(s_mn_event_group,
+        MN_NODE_A_DONE | MN_NODE_B_DONE, pdTRUE, pdTRUE,
+        pdMS_TO_TICKS(30000));
+
+    bool ok = (bits & (MN_NODE_A_DONE | MN_NODE_B_DONE)) ==
+              (MN_NODE_A_DONE | MN_NODE_B_DONE) &&
+              state_a->count >= MN_ROUNDS &&
+              state_b->count >= MN_ROUNDS;
+
+    ESP_LOGI(TAG, "Multi-node test %s (A=%d B=%d rounds)",
+             ok ? "passed" : "FAILED", state_a->count, state_b->count);
+
+    free(state_a);
+    free(state_b);
+    vEventGroupDelete(s_mn_event_group);
+    return ok;
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 void app_main(void) {
     esp_vfs_eventfd_config_t eventfd_config = {
-        .max_fds = 4,
+        .max_fds = 8,
     };
     ESP_ERROR_CHECK(esp_vfs_eventfd_register(&eventfd_config));
 
@@ -654,12 +832,13 @@ void app_main(void) {
         if (!test_ws_echo()) pass = false;
         if (!test_https_get()) pass = false;
         if (!test_wss_echo()) pass = false;
+        if (!test_multinode()) pass = false;
     } else {
         ESP_LOGW(TAG, "Skipping network tests (no WiFi)");
     }
 
     if (pass && wifi_ok) {
-        ESP_LOGI(TAG, "All 8 smoke tests passed!");
+        ESP_LOGI(TAG, "All 9 smoke tests passed!");
     } else if (pass) {
         ESP_LOGI(TAG, "Core tests passed (network tests skipped — no WiFi)");
     } else {
