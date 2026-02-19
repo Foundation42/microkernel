@@ -500,6 +500,138 @@ static bool test_ws_echo(void) {
     return ok;
 }
 
+/* ── Test 7: HTTPS GET ─────────────────────────────────────────────── */
+
+static bool https_get_behavior(runtime_t *rt, actor_t *self,
+                                message_t *msg, void *state) {
+    (void)self;
+    http_test_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        ESP_LOGI(TAG, "HTTPS GET https://httpbin.org/get");
+        actor_http_get(rt, "https://httpbin.org/get");
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_RESPONSE) {
+        const http_response_payload_t *p = msg->payload;
+        s->status_code = p->status_code;
+        s->body_size = p->body_size < sizeof(s->body) - 1 ?
+                       p->body_size : sizeof(s->body) - 1;
+        memcpy(s->body, http_response_body(p), s->body_size);
+        s->body[s->body_size] = '\0';
+        s->got_response = true;
+        return false;
+    }
+
+    if (msg->type == MSG_HTTP_ERROR) {
+        const http_error_payload_t *p = msg->payload;
+        ESP_LOGE(TAG, "HTTPS GET error: %s", p->message);
+        s->got_error = true;
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_https_get(void) {
+    ESP_LOGI(TAG, "=== Test 7: HTTPS GET ===");
+
+    runtime_t *rt = runtime_init(1, 16);
+    if (!rt) return false;
+
+    http_test_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, https_get_behavior, s, NULL, 16);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_response && s->status_code == 200 &&
+              strstr(s->body, "httpbin.org") != NULL;
+
+    ESP_LOGI(TAG, "HTTPS GET test %s (status=%d body_size=%zu)",
+             ok ? "passed" : "FAILED", s->status_code, s->body_size);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 8: WSS echo ──────────────────────────────────────────────── */
+
+static bool wss_echo_behavior(runtime_t *rt, actor_t *self,
+                               message_t *msg, void *state) {
+    (void)self;
+    ws_test_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        ESP_LOGI(TAG, "WSS connect wss://ws.postman-echo.com/raw");
+        s->conn_id = actor_ws_connect(rt, "wss://ws.postman-echo.com/raw");
+        if (s->conn_id == HTTP_CONN_ID_INVALID) {
+            ESP_LOGE(TAG, "WSS connect returned invalid");
+            s->got_error = true;
+            return false;
+        }
+        return true;
+    }
+
+    if (msg->type == MSG_WS_OPEN) {
+        s->opened = true;
+        ESP_LOGI(TAG, "WSS opened, sending message");
+        actor_ws_send_text(rt, s->conn_id, "tls from esp32", 14);
+        return true;
+    }
+
+    if (msg->type == MSG_WS_MESSAGE) {
+        const ws_message_payload_t *p = msg->payload;
+        const char *data = ws_message_data(p);
+        size_t len = p->data_size < sizeof(s->echo_msg) - 1 ?
+                     p->data_size : sizeof(s->echo_msg) - 1;
+        memcpy(s->echo_msg, data, len);
+        s->echo_msg[len] = '\0';
+        ESP_LOGI(TAG, "WSS received: %s", s->echo_msg);
+
+        if (strstr(s->echo_msg, "tls from esp32")) {
+            s->got_echo = true;
+            actor_ws_close(rt, s->conn_id, 1000, NULL);
+            return false;
+        }
+        return true;
+    }
+
+    if (msg->type == MSG_WS_CLOSED) {
+        return false;
+    }
+
+    if (msg->type == MSG_WS_ERROR) {
+        ESP_LOGE(TAG, "WSS error");
+        s->got_error = true;
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_wss_echo(void) {
+    ESP_LOGI(TAG, "=== Test 8: WSS echo ===");
+
+    runtime_t *rt = runtime_init(1, 32);
+    if (!rt) return false;
+
+    ws_test_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, wss_echo_behavior, s, NULL, 32);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->opened && s->got_echo && !s->got_error;
+
+    ESP_LOGI(TAG, "WSS echo test %s (opened=%d echo=%s)",
+             ok ? "passed" : "FAILED", s->opened, s->echo_msg);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 void app_main(void) {
@@ -520,12 +652,14 @@ void app_main(void) {
         if (!test_http_get()) pass = false;
         if (!test_http_post()) pass = false;
         if (!test_ws_echo()) pass = false;
+        if (!test_https_get()) pass = false;
+        if (!test_wss_echo()) pass = false;
     } else {
         ESP_LOGW(TAG, "Skipping network tests (no WiFi)");
     }
 
     if (pass && wifi_ok) {
-        ESP_LOGI(TAG, "All 6 smoke tests passed!");
+        ESP_LOGI(TAG, "All 8 smoke tests passed!");
     } else if (pass) {
         ESP_LOGI(TAG, "Core tests passed (network tests skipped — no WiFi)");
     } else {

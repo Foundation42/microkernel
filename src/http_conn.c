@@ -1063,7 +1063,7 @@ http_conn_id_t actor_http_fetch(runtime_t *rt, const char *method,
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
     uint16_t port = url_effective_port(&parsed);
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_TLS
     mk_socket_t *sock = url_is_tls(&parsed)
         ? mk_socket_tls_connect(parsed.host, port)
         : mk_socket_tcp_connect(parsed.host, port);
@@ -1106,7 +1106,7 @@ http_conn_id_t actor_sse_connect(runtime_t *rt, const char *url) {
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
     uint16_t port = url_effective_port(&parsed);
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_TLS
     mk_socket_t *sock = url_is_tls(&parsed)
         ? mk_socket_tls_connect(parsed.host, port)
         : mk_socket_tcp_connect(parsed.host, port);
@@ -1143,7 +1143,7 @@ http_conn_id_t actor_ws_connect(runtime_t *rt, const char *url) {
     if (!url_parse(url, &parsed)) return HTTP_CONN_ID_INVALID;
 
     uint16_t port = url_effective_port(&parsed);
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_TLS
     mk_socket_t *sock = (strcmp(parsed.scheme, "wss") == 0)
         ? mk_socket_tls_connect(parsed.host, port)
         : mk_socket_tcp_connect(parsed.host, port);

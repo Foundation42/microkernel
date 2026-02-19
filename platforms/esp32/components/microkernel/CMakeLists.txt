@@ -33,4 +33,5 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     MAX_TIMERS=8
     MAX_FD_WATCHES=8
     NAME_REGISTRY_SIZE=16
+    HAVE_MBEDTLS=1
 )
