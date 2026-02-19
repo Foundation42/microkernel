@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "microkernel/http.h"
 #include "microkernel/mk_socket.h"
 #include "microkernel/message.h"
@@ -14,7 +16,7 @@
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
-#include <poll.h>
+#include <sys/poll.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>

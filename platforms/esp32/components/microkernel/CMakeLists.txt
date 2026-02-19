@@ -13,6 +13,11 @@ idf_component_register(
         "${MK_SRC_DIR}/mk_socket_tcp.c"
         "${MK_SRC_DIR}/name_registry.c"
         "${MK_SRC_DIR}/log_actor.c"
+        "${MK_SRC_DIR}/http_conn.c"
+        "${MK_SRC_DIR}/url_parse.c"
+        "${MK_SRC_DIR}/sha1.c"
+        "${MK_SRC_DIR}/base64.c"
+        "${MK_SRC_DIR}/ws_frame.c"
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
     PRIV_INCLUDE_DIRS
@@ -22,6 +27,7 @@ idf_component_register(
 
 # ESP32 has ~280 KB heap — shrink embedded pools to fit
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    HTTP_READ_BUF_SIZE=4096
     MAX_HTTP_CONNS=4
     MAX_HTTP_LISTENERS=2
     MAX_TIMERS=8

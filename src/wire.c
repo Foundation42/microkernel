@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "microkernel/wire.h"
 #include <stdlib.h>
 #include <string.h>
