@@ -3,7 +3,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
-#include <endian.h>
+
+/* Portable 64-bit byte swap using htonl() — a no-op where <endian.h> macros exist */
+#ifndef htobe64
+static inline uint64_t htobe64(uint64_t x) {
+    uint32_t hi = htonl((uint32_t)(x >> 32));
+    uint32_t lo = htonl((uint32_t)(x & 0xFFFFFFFF));
+    return ((uint64_t)lo << 32) | hi;
+}
+#endif
+#ifndef be64toh
+static inline uint64_t be64toh(uint64_t x) {
+    return htobe64(x); /* self-inverse */
+}
+#endif
 
 void *wire_serialize(const message_t *msg, size_t *out_size) {
     if (!msg || !out_size) return NULL;

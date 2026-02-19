@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <poll.h>
+#include <sys/poll.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -129,7 +129,7 @@ void runtime_destroy(runtime_t *rt) {
     /* Close any active timerfds */
     for (size_t i = 0; i < MAX_TIMERS; i++) {
         if (rt->timers[i].id != TIMER_ID_INVALID) {
-            close(rt->timers[i].fd);
+            timer_platform_close(i, rt->timers[i].fd);
         }
     }
     /* Clean up HTTP connections */
@@ -308,7 +308,7 @@ static void cleanup_stopped(runtime_t *rt) {
             for (size_t t = 0; t < MAX_TIMERS; t++) {
                 if (rt->timers[t].id != TIMER_ID_INVALID &&
                     rt->timers[t].owner == id) {
-                    close(rt->timers[t].fd);
+                    timer_platform_close(t, rt->timers[t].fd);
                     memset(&rt->timers[t], 0, sizeof(timer_entry_t));
                 }
             }
@@ -540,7 +540,7 @@ static bool poll_and_dispatch(runtime_t *rt, int timeout_ms) {
             }
             /* One-shot: auto-clean after fire */
             if (!te->periodic) {
-                close(te->fd);
+                timer_platform_close(te - rt->timers, te->fd);
                 memset(te, 0, sizeof(timer_entry_t));
             }
             break;

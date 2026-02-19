@@ -9,6 +9,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+
 typedef struct {
     int      listen_fd;     /* -1 for client */
     int      conn_fd;       /* connected socket, -1 until accept/connect */

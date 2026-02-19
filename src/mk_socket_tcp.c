@@ -11,6 +11,13 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+
 typedef struct {
     int fd;
 } tcp_socket_ctx_t;

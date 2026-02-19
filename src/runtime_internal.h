@@ -140,6 +140,9 @@ http_listener_t *runtime_get_http_listeners(runtime_t *rt);
 bool runtime_deliver_msg(runtime_t *rt, actor_id_t dest, msg_type_t type,
                          const void *payload, size_t payload_size);
 
+/* Platform-specific timer fd cleanup (Linux: close; ESP32: stop esp_timer + close eventfd) */
+void timer_platform_close(size_t slot, int fd);
+
 /* Drive an HTTP connection (called from runtime.c poll loop) */
 void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt);
 

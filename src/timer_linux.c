@@ -60,3 +60,8 @@ bool actor_cancel_timer(runtime_t *rt, timer_id_t id) {
     }
     return false;
 }
+
+void timer_platform_close(size_t slot, int fd) {
+    (void)slot;
+    close(fd);
+}
