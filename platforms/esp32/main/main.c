@@ -13,6 +13,7 @@
 #include "microkernel/message.h"
 #include "microkernel/transport_tcp.h"
 #include "microkernel/http.h"
+#include <lwip/sockets.h>
 #include "wifi_config.h"
 
 static const char *TAG = "mk_smoke";
@@ -810,6 +811,199 @@ static bool test_multinode(void) {
     return ok;
 }
 
+/* ── Test 10: Cross-device distributed actors over WiFi ────────────── */
+
+#define DISCOVER_PORT  19902
+#define CROSS_TCP_PORT 19903
+
+typedef struct {
+    uint8_t  mac[6];
+    uint32_t ip;        /* network byte order */
+    bool     is_server; /* true = I am node A (server, lower MAC) */
+} peer_info_t;
+
+static bool discover_peer(peer_info_t *peer, uint8_t my_mac[6], uint32_t my_ip) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Discovery: socket() failed");
+        return false;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in bind_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(DISCOVER_PORT),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+        ESP_LOGE(TAG, "Discovery: bind() failed");
+        close(sock);
+        return false;
+    }
+
+    /* 200ms receive timeout */
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in bcast_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(DISCOVER_PORT),
+        .sin_addr.s_addr = htonl(INADDR_BROADCAST),
+    };
+
+    /* Announcement: "MK" (2) + MAC (6) + IP (4) + port (2) = 14 bytes */
+    uint8_t pkt[14];
+    pkt[0] = 'M'; pkt[1] = 'K';
+    memcpy(&pkt[2], my_mac, 6);
+    memcpy(&pkt[8], &my_ip, 4);
+    uint16_t port_net = htons(CROSS_TCP_PORT);
+    memcpy(&pkt[12], &port_net, 2);
+
+    bool found = false;
+    TickType_t found_at = 0;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(15000);
+
+    while (xTaskGetTickCount() < deadline) {
+        /* Keep broadcasting even after finding peer, so peer discovers us too */
+        sendto(sock, pkt, sizeof(pkt), 0,
+               (struct sockaddr *)&bcast_addr, sizeof(bcast_addr));
+
+        if (found && (xTaskGetTickCount() - found_at) >= pdMS_TO_TICKS(2000))
+            break;
+
+        uint8_t recv_buf[14];
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int n = recvfrom(sock, recv_buf, sizeof(recv_buf), 0,
+                         (struct sockaddr *)&from, &from_len);
+
+        if (!found && n == 14 && recv_buf[0] == 'M' && recv_buf[1] == 'K') {
+            /* Ignore our own broadcasts */
+            if (memcmp(&recv_buf[2], my_mac, 6) != 0) {
+                memcpy(peer->mac, &recv_buf[2], 6);
+                memcpy(&peer->ip, &recv_buf[8], 4);
+                peer->is_server = (memcmp(my_mac, peer->mac, 6) < 0);
+
+                struct in_addr addr = { .s_addr = peer->ip };
+                ESP_LOGI(TAG, "Discovered peer: %s (I am %s)",
+                         inet_ntoa(addr),
+                         peer->is_server ? "server/node A" : "client/node B");
+                found = true;
+                found_at = xTaskGetTickCount();
+            }
+        }
+    }
+
+    close(sock);
+    return found;
+}
+
+static bool run_cross_server(peer_info_t *peer) {
+    (void)peer;
+    ESP_LOGI(TAG, "Cross-device: running as server (node A) on port %d", CROSS_TCP_PORT);
+
+    transport_t *tp = transport_tcp_listen("0.0.0.0", CROSS_TCP_PORT, MN_NODE_B);
+    if (!tp) {
+        ESP_LOGE(TAG, "Cross-device: transport_tcp_listen failed");
+        return false;
+    }
+
+    runtime_t *rt = runtime_init(MN_NODE_A, 8);
+    if (!rt) {
+        tp->destroy(tp);
+        return false;
+    }
+
+    runtime_add_transport(rt, tp);
+
+    mn_state_t *state = calloc(1, sizeof(*state));
+    state->peer = actor_id_make(MN_NODE_B, 1);
+    state->target = MN_ROUNDS;
+    actor_spawn(rt, mn_node_a_behavior, state, NULL, 16);
+
+    ESP_LOGI(TAG, "Cross-device server: waiting for ping from peer...");
+    runtime_run(rt);
+
+    bool ok = (state->count >= MN_ROUNDS);
+    ESP_LOGI(TAG, "Cross-device server: done (count=%d)", state->count);
+
+    runtime_destroy(rt);
+    free(state);
+    return ok;
+}
+
+static bool run_cross_client(peer_info_t *peer) {
+    /* Give server time to set up listen socket */
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    struct in_addr addr = { .s_addr = peer->ip };
+    char *peer_ip = inet_ntoa(addr);
+    ESP_LOGI(TAG, "Cross-device: connecting to %s:%d", peer_ip, CROSS_TCP_PORT);
+
+    transport_t *tp = transport_tcp_connect(peer_ip, CROSS_TCP_PORT, MN_NODE_A);
+    if (!tp) {
+        ESP_LOGE(TAG, "Cross-device: transport_tcp_connect failed");
+        return false;
+    }
+
+    runtime_t *rt = runtime_init(MN_NODE_B, 8);
+    if (!rt) {
+        tp->destroy(tp);
+        return false;
+    }
+
+    runtime_add_transport(rt, tp);
+
+    mn_state_t *state = calloc(1, sizeof(*state));
+    state->peer = actor_id_make(MN_NODE_A, 1);
+    state->target = MN_ROUNDS;
+    actor_id_t id = actor_spawn(rt, mn_node_b_behavior, state, NULL, 16);
+
+    /* Bootstrap triggers initial MSG_PING */
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+
+    ESP_LOGI(TAG, "Cross-device client: sending first ping...");
+    runtime_run(rt);
+
+    bool ok = (state->count >= MN_ROUNDS);
+    ESP_LOGI(TAG, "Cross-device client: done (count=%d)", state->count);
+
+    runtime_destroy(rt);
+    free(state);
+    return ok;
+}
+
+static bool test_cross_device(void) {
+    ESP_LOGI(TAG, "=== Test 10: Cross-device distributed actors ===");
+
+    uint8_t my_mac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, my_mac);
+
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_get_ip_info(netif, &ip_info);
+
+    ESP_LOGI(TAG, "My MAC: %02x:%02x:%02x:%02x:%02x:%02x  IP: " IPSTR,
+             my_mac[0], my_mac[1], my_mac[2],
+             my_mac[3], my_mac[4], my_mac[5],
+             IP2STR(&ip_info.ip));
+
+    peer_info_t peer = {0};
+    if (!discover_peer(&peer, my_mac, ip_info.ip.addr)) {
+        ESP_LOGW(TAG, "Test 10: no peer discovered, skipping cross-device test");
+        return true; /* skip, not fail */
+    }
+
+    if (peer.is_server) {
+        return run_cross_server(&peer);
+    } else {
+        return run_cross_client(&peer);
+    }
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 void app_main(void) {
@@ -833,12 +1027,13 @@ void app_main(void) {
         if (!test_https_get()) pass = false;
         if (!test_wss_echo()) pass = false;
         if (!test_multinode()) pass = false;
+        if (!test_cross_device()) pass = false;
     } else {
         ESP_LOGW(TAG, "Skipping network tests (no WiFi)");
     }
 
     if (pass && wifi_ok) {
-        ESP_LOGI(TAG, "All 9 smoke tests passed!");
+        ESP_LOGI(TAG, "All 10 smoke tests passed!");
     } else if (pass) {
         ESP_LOGI(TAG, "Core tests passed (network tests skipped — no WiFi)");
     } else {
