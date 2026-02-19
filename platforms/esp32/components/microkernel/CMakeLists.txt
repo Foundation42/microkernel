@@ -19,3 +19,12 @@ idf_component_register(
         "${MK_SRC_DIR}"
     REQUIRES microkernel_hal
 )
+
+# ESP32 has ~280 KB heap — shrink embedded pools to fit
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    MAX_HTTP_CONNS=4
+    MAX_HTTP_LISTENERS=2
+    MAX_TIMERS=8
+    MAX_FD_WATCHES=8
+    NAME_REGISTRY_SIZE=16
+)

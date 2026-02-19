@@ -14,9 +14,15 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#ifndef MAX_TRANSPORTS
 #define MAX_TRANSPORTS 16
+#endif
+#ifndef MAX_TIMERS
 #define MAX_TIMERS      32
+#endif
+#ifndef MAX_FD_WATCHES
 #define MAX_FD_WATCHES  32
+#endif
 #define MAX_POLL_FDS    (MAX_TRANSPORTS + MAX_TIMERS + MAX_FD_WATCHES + MAX_HTTP_CONNS + MAX_HTTP_LISTENERS)
 
 /* ── Internal types ────────────────────────────────────────────────── */
@@ -42,7 +48,9 @@ typedef struct {
     actor_id_t  owner;
 } fd_watch_entry_t;
 
+#ifndef NAME_REGISTRY_SIZE
 #define NAME_REGISTRY_SIZE 128
+#endif
 #define NAME_MAX_LEN 64
 
 struct runtime {

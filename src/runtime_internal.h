@@ -50,8 +50,12 @@ typedef enum {
     HTTP_CONN_SERVER_WS
 } http_conn_type_t;
 
+#ifndef HTTP_READ_BUF_SIZE
 #define HTTP_READ_BUF_SIZE 8192
+#endif
+#ifndef MAX_HTTP_CONNS
 #define MAX_HTTP_CONNS 32
+#endif
 
 typedef struct {
     http_conn_id_t   id;          /* 0 = unused slot */
@@ -106,7 +110,9 @@ typedef struct {
 
 /* ── HTTP listener (server-side) ──────────────────────────────────── */
 
+#ifndef MAX_HTTP_LISTENERS
 #define MAX_HTTP_LISTENERS 8
+#endif
 
 typedef struct {
     int         listen_fd;   /* -1 = unused */
