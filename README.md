@@ -90,6 +90,65 @@ int main(void) {
 }
 ```
 
+### WASM actor in Rust
+
+Actors can be written in any language that compiles to WASM. Here is a Rust actor
+that echoes messages back to the sender, with a sleep to demonstrate fiber-based
+cooperative yielding:
+
+```rust
+// actor.rs -- compile with: rustup target add wasm32-unknown-unknown
+//   cargo build --target wasm32-unknown-unknown --release
+#![no_std]
+#![no_main]
+
+extern "C" {
+    fn mk_send(dest: i64, msg_type: i32, payload: *const u8, size: i32) -> i32;
+    fn mk_sleep_ms(ms: i32) -> i32;
+}
+
+const MSG_PING: i32 = 200;
+const MSG_PONG: i32 = 201;
+
+#[no_mangle]
+pub extern "C" fn handle_message(
+    msg_type: i32,
+    source: i64,
+    payload: *const u8,
+    payload_size: i32,
+) -> i32 {
+    match msg_type {
+        MSG_PING => unsafe {
+            // Yield to the runtime for 100ms -- other actors keep running
+            mk_sleep_ms(100);
+            // Resumed after sleep; echo the payload back
+            mk_send(source, MSG_PONG, payload, payload_size);
+            1 // keep alive
+        },
+        0 => 0, // stop
+        _ => 1, // ignore
+    }
+}
+
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+```
+
+Spawn it from C (or from another WASM actor):
+
+```c
+wasm_actors_init();
+runtime_t *rt = runtime_init(1, 16);
+actor_id_t wasm = actor_spawn_wasm_file(rt, "actor.wasm", 16,
+                                          WASM_DEFAULT_STACK_SIZE,
+                                          WASM_DEFAULT_HEAP_SIZE,
+                                          FIBER_STACK_SMALL);
+actor_send(rt, wasm, 200, "hello", 5);
+runtime_run(rt);
+```
+
+The same `.wasm` binary runs on both Linux and ESP32 without recompilation.
+
 ## Project structure
 
 ```
