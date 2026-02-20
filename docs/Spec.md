@@ -2,6 +2,12 @@
 
 Christian Beaumont - February 2026
 
+> **Note:** This is the original design specification written before implementation
+> began. It is retained as a historical reference. The actual implementation diverges
+> in several areas (e.g., no separate router module, different transport API signatures,
+> additional phases beyond the original five). See [architecture.md](architecture.md)
+> and [api.md](api.md) for current documentation.
+
 ## 1. Overview & Goals
 
 ### What We're Building
