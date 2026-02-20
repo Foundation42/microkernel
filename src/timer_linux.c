@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "runtime_internal.h"
 #include <sys/timerfd.h>
 #include <unistd.h>

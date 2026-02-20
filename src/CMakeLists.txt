@@ -37,3 +37,57 @@ if(OpenSSL_FOUND)
     target_link_libraries(microkernel PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(microkernel PUBLIC HAVE_OPENSSL=1)
 endif()
+
+# Phase 12: WASM actor support via WAMR
+option(ENABLE_WASM "Enable WASM actor support via WAMR" ON)
+if(ENABLE_WASM)
+    # Auto-init submodule if directory exists but is empty
+    if(EXISTS "${PROJECT_SOURCE_DIR}/.gitmodules"
+       AND NOT EXISTS "${PROJECT_SOURCE_DIR}/third_party/wamr/CMakeLists.txt")
+        execute_process(
+            COMMAND git submodule update --init third_party/wamr
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    endif()
+
+    if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/wamr/CMakeLists.txt")
+        set(WAMR_ROOT_DIR "${PROJECT_SOURCE_DIR}/third_party/wamr")
+        set(WAMR_BUILD_PLATFORM "linux")
+
+        # Auto-detect target architecture
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+            set(WAMR_BUILD_TARGET "X86_64")
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+            set(WAMR_BUILD_TARGET "AARCH64")
+        else()
+            set(WAMR_BUILD_TARGET "X86_64")
+        endif()
+
+        set(WAMR_BUILD_INTERP 1)
+        set(WAMR_BUILD_AOT 1)
+        set(WAMR_BUILD_FAST_INTERP 1)
+        set(WAMR_BUILD_LIBC_BUILTIN 1)
+        set(WAMR_BUILD_LIBC_WASI 0)
+        include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
+
+        add_library(vmlib STATIC ${WAMR_RUNTIME_LIB_SOURCE})
+        target_compile_options(vmlib PRIVATE -w)
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            target_compile_options(vmlib PRIVATE -fno-sanitize=address,undefined)
+            target_link_options(vmlib PRIVATE -fno-sanitize=address,undefined)
+        endif()
+
+        target_sources(microkernel PRIVATE wasm_actor.c)
+        target_link_libraries(microkernel PUBLIC vmlib m)
+        target_compile_definitions(microkernel PUBLIC HAVE_WASM=1)
+        target_include_directories(microkernel PRIVATE
+            ${WAMR_ROOT_DIR}/core/iwasm/include)
+        set(HAVE_WASM TRUE CACHE INTERNAL "")
+        message(STATUS "WASM actor support: enabled (WAMR, target=${WAMR_BUILD_TARGET})")
+    else()
+        set(HAVE_WASM FALSE CACHE INTERNAL "")
+        message(STATUS "WASM actor support: disabled (WAMR not found)")
+    endif()
+else()
+    set(HAVE_WASM FALSE CACHE INTERNAL "")
+    message(STATUS "WASM actor support: disabled (ENABLE_WASM=OFF)")
+endif()

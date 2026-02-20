@@ -36,6 +36,30 @@ add_microkernel_test(test_ws_server)
 add_microkernel_test(test_supervision)
 add_microkernel_test(test_distributed_registry)
 
+# Phase 12: WASM actor test
+if(HAVE_WASM)
+    find_program(WASM_CC clang)
+    if(WASM_CC)
+        set(WASM_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+        add_custom_command(
+            OUTPUT ${WASM_OUT_DIR}/echo.wasm
+            COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
+                    -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -o ${WASM_OUT_DIR}/echo.wasm
+                    ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/echo.c
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/echo.c
+            COMMENT "Compiling echo.wasm")
+        add_custom_target(wasm_test_modules ALL DEPENDS ${WASM_OUT_DIR}/echo.wasm)
+
+        add_microkernel_test(test_wasm_actor)
+        add_dependencies(test_wasm_actor wasm_test_modules)
+        target_compile_definitions(test_wasm_actor PRIVATE
+            WASM_MODULE_DIR="${WASM_OUT_DIR}")
+    else()
+        message(STATUS "WASM test: skipped (clang not found)")
+    endif()
+endif()
+
 # ── Real-world tests (require network) ──────────────────────────────
 option(BUILD_REALWORLD_TESTS "Build tests requiring network" OFF)
 if(BUILD_REALWORLD_TESTS)
