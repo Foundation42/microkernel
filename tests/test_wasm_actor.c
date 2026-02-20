@@ -46,6 +46,10 @@ static uint8_t *load_echo_wasm(size_t *out_size) {
 #define MSG_PONG       201
 #define MSG_GET_SELF   202
 #define MSG_SELF_REPLY 203
+#define MSG_SLEEP_TEST 204
+#define MSG_RECV_TEST  205
+#define MSG_RECV_REPLY 206
+#define MSG_SLEEP_ERR  207
 
 /* Trigger message: tells tester to send a message to target */
 #define MSG_TRIGGER    100
@@ -112,7 +116,8 @@ static int test_wasm_spawn(void) {
     runtime_t *rt = runtime_init(0, 64);
     actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
                                            WASM_DEFAULT_STACK_SIZE,
-                                           WASM_DEFAULT_HEAP_SIZE);
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
     ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
 
     runtime_destroy(rt);
@@ -130,7 +135,8 @@ static int test_wasm_echo(void) {
     runtime_t *rt = runtime_init(0, 64);
     actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
                                            WASM_DEFAULT_STACK_SIZE,
-                                           WASM_DEFAULT_HEAP_SIZE);
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
     ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
 
     tester_state_t ts = { .target = wasm_id };
@@ -162,7 +168,8 @@ static int test_wasm_self(void) {
     runtime_t *rt = runtime_init(0, 64);
     actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
                                            WASM_DEFAULT_STACK_SIZE,
-                                           WASM_DEFAULT_HEAP_SIZE);
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
     ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
 
     tester_state_t ts = { .target = wasm_id };
@@ -195,7 +202,8 @@ static int test_wasm_stop(void) {
     runtime_t *rt = runtime_init(0, 64);
     actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
                                            WASM_DEFAULT_STACK_SIZE,
-                                           WASM_DEFAULT_HEAP_SIZE);
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
     ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
 
     /* Send type 0 from outside — source=ACTOR_ID_INVALID is fine,
@@ -222,7 +230,8 @@ static int test_wasm_supervision(void) {
 
     wasm_factory_arg_t *farg = wasm_factory_arg_create(wasm_buf, wasm_size,
                                                         WASM_DEFAULT_STACK_SIZE,
-                                                        WASM_DEFAULT_HEAP_SIZE);
+                                                        WASM_DEFAULT_HEAP_SIZE,
+                                                        FIBER_STACK_NONE);
     ASSERT_NOT_NULL(farg);
 
     child_spec_t specs[] = {
@@ -286,7 +295,8 @@ static int test_wasm_named(void) {
     runtime_t *rt = runtime_init(0, 64);
     actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
                                            WASM_DEFAULT_STACK_SIZE,
-                                           WASM_DEFAULT_HEAP_SIZE);
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
     ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
 
     /* Register the WASM actor with a name */
@@ -313,6 +323,116 @@ static int test_wasm_named(void) {
     return 0;
 }
 
+/* ── Test 7: Fiber sleep ──────────────────────────────────────────── */
+
+static int test_wasm_fiber_sleep(void) {
+    size_t wasm_size;
+    uint8_t *wasm_buf = load_echo_wasm(&wasm_size);
+    ASSERT_NOT_NULL(wasm_buf);
+
+    runtime_t *rt = runtime_init(0, 64);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_SMALL);
+    ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
+
+    tester_state_t ts = { .target = wasm_id };
+    actor_id_t tester = actor_spawn(rt, tester_behavior, &ts, NULL, 16);
+
+    /* Send SLEEP_TEST — WASM actor will call mk_sleep_ms(50), yield fiber */
+    trigger_send(rt, tester, MSG_SLEEP_TEST, NULL, 0);
+
+    /* Use runtime_run() — need timers/poll to fire the one-shot timer */
+    runtime_run(rt);
+
+    /* Tester should have received PONG with "slept" payload */
+    ASSERT_EQ(ts.got_type, (msg_type_t)MSG_PONG);
+    ASSERT_EQ(ts.got_size, (size_t)5);
+    ASSERT(memcmp(ts.got_payload, "slept", 5) == 0);
+    (void)tester;
+
+    runtime_destroy(rt);
+    free(wasm_buf);
+    return 0;
+}
+
+/* ── Test 8: Fiber recv ───────────────────────────────────────────── */
+
+static int test_wasm_fiber_recv(void) {
+    size_t wasm_size;
+    uint8_t *wasm_buf = load_echo_wasm(&wasm_size);
+    ASSERT_NOT_NULL(wasm_buf);
+
+    runtime_t *rt = runtime_init(0, 64);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_SMALL);
+    ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
+
+    tester_state_t ts = { .target = wasm_id };
+    actor_id_t tester = actor_spawn(rt, tester_behavior, &ts, NULL, 16);
+
+    /* Trigger RECV_TEST — WASM actor will call mk_recv(), fiber yields */
+    trigger_send(rt, tester, MSG_RECV_TEST, NULL, 0);
+    drain(rt, 20);  /* Process trigger + RECV_TEST delivery + fiber yield */
+
+    /* Now send a PING with "hello" payload to the WASM actor.
+       When it resumes, mk_recv returns this message, actor sends RECV_REPLY. */
+    trigger_send(rt, tester, MSG_PING, "hello", 5);
+    drain(rt, 30);
+
+    /* Tester should have received RECV_REPLY with "hello" */
+    ASSERT_EQ(ts.got_type, (msg_type_t)MSG_RECV_REPLY);
+    ASSERT_EQ(ts.got_size, (size_t)5);
+    ASSERT(memcmp(ts.got_payload, "hello", 5) == 0);
+    (void)tester;
+
+    runtime_destroy(rt);
+    free(wasm_buf);
+    return 0;
+}
+
+/* ── Test 9: Fiber none error ─────────────────────────────────────── */
+
+static int test_wasm_fiber_none_error(void) {
+    size_t wasm_size;
+    uint8_t *wasm_buf = load_echo_wasm(&wasm_size);
+    ASSERT_NOT_NULL(wasm_buf);
+
+    runtime_t *rt = runtime_init(0, 64);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, wasm_buf, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
+    ASSERT_NE(wasm_id, ACTOR_ID_INVALID);
+
+    tester_state_t ts = { .target = wasm_id };
+    actor_id_t tester = actor_spawn(rt, tester_behavior, &ts, NULL, 16);
+
+    /* Send SLEEP_TEST to a non-fiber actor — mk_sleep_ms returns -1,
+       WASM code sends MSG_SLEEP_ERR with "no_fiber" */
+    trigger_send(rt, tester, MSG_SLEEP_TEST, NULL, 0);
+    drain(rt, 30);
+
+    ASSERT_EQ(ts.got_type, (msg_type_t)MSG_SLEEP_ERR);
+    ASSERT_EQ(ts.got_size, (size_t)8);
+    ASSERT(memcmp(ts.got_payload, "no_fiber", 8) == 0);
+
+    /* Actor should still be alive — verify with a PING */
+    ts.got_type = 0;
+    ts.reply_count = 0;
+    trigger_send(rt, tester, MSG_PING, "ok", 2);
+    drain(rt, 20);
+    ASSERT_EQ(ts.got_type, (msg_type_t)MSG_PONG);
+    (void)tester;
+
+    runtime_destroy(rt);
+    free(wasm_buf);
+    return 0;
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -328,6 +448,9 @@ int main(void) {
     RUN_TEST(test_wasm_stop);
     RUN_TEST(test_wasm_supervision);
     RUN_TEST(test_wasm_named);
+    RUN_TEST(test_wasm_fiber_sleep);
+    RUN_TEST(test_wasm_fiber_recv);
+    RUN_TEST(test_wasm_fiber_none_error);
 
     wasm_actors_cleanup();
     TEST_REPORT();

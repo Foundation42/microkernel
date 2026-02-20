@@ -10,15 +10,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ucontext.h>
 
 /* ── Factory arg (owns module + buffer copy) ──────────────────────── */
 
 struct wasm_factory_arg {
-    uint8_t       *wasm_buf;       /* owned copy of WASM bytes */
-    size_t         wasm_size;
-    wasm_module_t  module;         /* parsed once, shared across instances */
-    uint32_t       stack_size;
-    uint32_t       heap_size;
+    uint8_t              *wasm_buf;       /* owned copy of WASM bytes */
+    size_t                wasm_size;
+    wasm_module_t         module;         /* parsed once, shared across instances */
+    uint32_t              stack_size;
+    uint32_t              heap_size;
+    fiber_stack_class_t   fiber_stack;
 };
 
 /* ── Per-actor state (owns instance + exec_env only) ──────────────── */
@@ -31,6 +33,23 @@ typedef struct {
     bool                 owns_module;      /* true for standalone spawn */
     wasm_module_t        module;           /* only valid if owns_module */
     uint8_t             *module_buf;       /* only valid if owns_module */
+
+    /* Fiber support */
+    ucontext_t    fiber_ctx;        /* saved fiber context */
+    ucontext_t    caller_ctx;       /* saved caller context (behavior fn) */
+    uint8_t      *fiber_stack;      /* malloc'd native stack, NULL if sync-only */
+    size_t        fiber_stack_size;
+    bool          fiber_yielded;    /* true if fiber suspended mid-execution */
+    int           fiber_result;     /* handle_message return: 1=alive, 0=stop, -1=trap */
+
+    /* Pending message data (copied for fiber_entry to consume) */
+    uint32_t      pending_argv[5];
+
+    /* For mk_recv: stash message delivered while fiber suspended */
+    message_t    *recv_msg;
+
+    /* WASM-side payload buffer offset (for cleanup after fiber completes) */
+    uint64_t      wasm_buf_offset;
 } wasm_actor_state_t;
 
 /* ── Host functions ───────────────────────────────────────────────── */
@@ -57,13 +76,52 @@ static void mk_log_native(wasm_exec_env_t env, int32_t level,
     actor_log(s->rt, level, "%s", buf);
 }
 
+static int32_t mk_sleep_ms_native(wasm_exec_env_t env, int32_t ms) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!s->fiber_stack)
+        return -1;  /* no fiber — can't yield */
+
+    actor_set_timer(s->rt, (uint64_t)ms, false);
+    s->fiber_yielded = true;
+    swapcontext(&s->fiber_ctx, &s->caller_ctx);
+    /* Resumed by behavior after timer fires */
+    return 0;
+}
+
+static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
+                                uint8_t *buf, int32_t buf_size,
+                                uint32_t *size_out) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!s->fiber_stack)
+        return -1;  /* no fiber — can't yield */
+
+    s->recv_msg = NULL;
+    s->fiber_yielded = true;
+    swapcontext(&s->fiber_ctx, &s->caller_ctx);
+    /* Resumed by behavior when a message arrives */
+
+    if (!s->recv_msg)
+        return -1;
+
+    *type_out = (uint32_t)s->recv_msg->type;
+    size_t copy_size = s->recv_msg->payload_size;
+    if (copy_size > (size_t)buf_size)
+        copy_size = (size_t)buf_size;
+    if (copy_size > 0 && s->recv_msg->payload)
+        memcpy(buf, s->recv_msg->payload, copy_size);
+    *size_out = (uint32_t)s->recv_msg->payload_size;
+    return 0;
+}
+
 /* WAMR's NativeSymbol uses void* for func_ptr; suppress pedantic warning */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 static NativeSymbol native_symbols[] = {
-    { "mk_send", mk_send_native, "(Ii*~)i", NULL },
-    { "mk_self", mk_self_native, "()I",     NULL },
-    { "mk_log",  mk_log_native,  "(i*~)",   NULL },
+    { "mk_send",     mk_send_native,     "(Ii*~)i",   NULL },
+    { "mk_self",     mk_self_native,     "()I",       NULL },
+    { "mk_log",      mk_log_native,      "(i*~)",     NULL },
+    { "mk_sleep_ms", mk_sleep_ms_native, "(i)i",      NULL },
+    { "mk_recv",     mk_recv_native,     "(**~*)i",   NULL },
 };
 #pragma GCC diagnostic pop
 
@@ -88,7 +146,8 @@ void wasm_actors_cleanup(void) {
 wasm_factory_arg_t *wasm_factory_arg_create(const uint8_t *wasm_buf,
                                              size_t wasm_size,
                                              uint32_t stack_size,
-                                             uint32_t heap_size) {
+                                             uint32_t heap_size,
+                                             fiber_stack_class_t fiber_stack) {
     wasm_factory_arg_t *arg = calloc(1, sizeof(*arg));
     if (!arg) return NULL;
 
@@ -101,6 +160,7 @@ wasm_factory_arg_t *wasm_factory_arg_create(const uint8_t *wasm_buf,
     arg->wasm_size = wasm_size;
     arg->stack_size = stack_size;
     arg->heap_size = heap_size;
+    arg->fiber_stack = fiber_stack;
 
     char error_buf[128];
     arg->module = wasm_runtime_load(arg->wasm_buf, (uint32_t)wasm_size,
@@ -121,6 +181,29 @@ void wasm_factory_arg_destroy(wasm_factory_arg_t *arg) {
         wasm_runtime_unload(arg->module);
     free(arg->wasm_buf);
     free(arg);
+}
+
+/* ── Fiber entry point ────────────────────────────────────────────── */
+
+/* makecontext only guarantees int-sized args. Split pointer into two. */
+static void fiber_entry(unsigned int lo, unsigned int hi) {
+    uintptr_t addr = ((uintptr_t)hi << 32) | (uintptr_t)lo;
+    wasm_actor_state_t *state = (wasm_actor_state_t *)addr;
+
+    bool ok = wasm_runtime_call_wasm(state->exec_env,
+                                      state->handle_message_fn, 5,
+                                      state->pending_argv);
+    if (ok) {
+        state->fiber_result = state->pending_argv[0] != 0 ? 1 : 0;
+    } else {
+        const char *exception = wasm_runtime_get_exception(state->instance);
+        fprintf(stderr, "wasm fiber: trap: %s\n",
+                exception ? exception : "(unknown)");
+        state->fiber_result = -1;
+    }
+
+    state->fiber_yielded = false;
+    /* Returns to caller_ctx via uc_link */
 }
 
 /* ── Factory function (creates per-actor instance) ────────────────── */
@@ -163,6 +246,26 @@ void *wasm_actor_factory(void *arg_ptr) {
 
     wasm_runtime_set_user_data(state->exec_env, state);
     state->owns_module = false;
+
+    /* Allocate fiber stack if requested */
+    if (arg->fiber_stack != FIBER_STACK_NONE) {
+        size_t sz = (size_t)arg->fiber_stack;
+        state->fiber_stack = malloc(sz);
+        if (!state->fiber_stack) {
+            fprintf(stderr, "wasm_actor_factory: fiber stack alloc failed\n");
+            wasm_runtime_destroy_exec_env(state->exec_env);
+            wasm_runtime_deinstantiate(state->instance);
+            free(state);
+            return NULL;
+        }
+        state->fiber_stack_size = sz;
+
+        /* Tell WAMR about our fiber stack boundary (guard zone at bottom) */
+        wasm_runtime_set_native_stack_boundary(
+            state->exec_env,
+            state->fiber_stack + FIBER_GUARD_SIZE);
+    }
+
     return state;
 }
 
@@ -180,6 +283,7 @@ void wasm_actor_free(void *state_ptr) {
             wasm_runtime_unload(state->module);
         free(state->module_buf);
     }
+    free(state->fiber_stack);
     free(state);
 }
 
@@ -190,6 +294,28 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     (void)self;
     wasm_actor_state_t *state = state_ptr;
     state->rt = rt;
+
+    /* ── Case 1: Resume suspended fiber ────────────────────────────── */
+    if (state->fiber_yielded) {
+        /* Stash message for mk_recv if the fiber was blocked on recv */
+        state->recv_msg = msg;
+        swapcontext(&state->caller_ctx, &state->fiber_ctx);
+
+        if (state->fiber_yielded) {
+            /* Fiber yielded again (another blocking call) — keep alive */
+            return true;
+        }
+
+        /* Fiber completed — clean up WASM payload buffer from initial call */
+        if (state->wasm_buf_offset != 0) {
+            wasm_runtime_module_free(state->instance, state->wasm_buf_offset);
+            state->wasm_buf_offset = 0;
+        }
+
+        if (state->fiber_result < 0)
+            return false;  /* trap */
+        return state->fiber_result != 0;
+    }
 
     wasm_module_inst_t inst = state->instance;
     uint64_t wasm_buf_offset = 0;
@@ -216,32 +342,72 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     argv[3] = (uint32_t)wasm_buf_offset;
     argv[4] = (uint32_t)msg->payload_size;
 
-    bool ok = wasm_runtime_call_wasm(state->exec_env,
-                                      state->handle_message_fn, 5, argv);
+    /* ── Case 2: Sync path (no fiber stack) ────────────────────────── */
+    if (!state->fiber_stack) {
+        bool ok = wasm_runtime_call_wasm(state->exec_env,
+                                          state->handle_message_fn, 5, argv);
 
-    /* Free WASM-side payload buffer */
-    if (wasm_buf_offset != 0)
-        wasm_runtime_module_free(inst, wasm_buf_offset);
+        if (wasm_buf_offset != 0)
+            wasm_runtime_module_free(inst, wasm_buf_offset);
 
-    if (!ok) {
-        const char *exception = wasm_runtime_get_exception(inst);
-        fprintf(stderr, "wasm_actor_behavior: trap: %s\n",
-                exception ? exception : "(unknown)");
+        if (!ok) {
+            const char *exception = wasm_runtime_get_exception(inst);
+            fprintf(stderr, "wasm_actor_behavior: trap: %s\n",
+                    exception ? exception : "(unknown)");
+            return false;
+        }
+        return argv[0] != 0;
+    }
+
+    /* ── Case 3: Start new fiber ───────────────────────────────────── */
+    memcpy(state->pending_argv, argv, sizeof(argv));
+    state->wasm_buf_offset = wasm_buf_offset;
+    state->fiber_result = 1;
+    state->fiber_yielded = false;
+
+    if (getcontext(&state->fiber_ctx) == -1) {
+        fprintf(stderr, "wasm_actor_behavior: getcontext failed\n");
+        if (wasm_buf_offset != 0)
+            wasm_runtime_module_free(inst, wasm_buf_offset);
         return false;
     }
 
-    /* argv[0] now holds the i32 return value */
-    return argv[0] != 0;
+    state->fiber_ctx.uc_stack.ss_sp = state->fiber_stack;
+    state->fiber_ctx.uc_stack.ss_size = state->fiber_stack_size;
+    state->fiber_ctx.uc_link = &state->caller_ctx;
+
+    uintptr_t addr = (uintptr_t)state;
+    unsigned int lo = (unsigned int)(addr & 0xFFFFFFFF);
+    unsigned int hi = (unsigned int)((addr >> 32) & 0xFFFFFFFF);
+    makecontext(&state->fiber_ctx, (void (*)(void))fiber_entry, 2, lo, hi);
+
+    swapcontext(&state->caller_ctx, &state->fiber_ctx);
+
+    if (state->fiber_yielded) {
+        /* Fiber yielded — keep alive, don't free WASM buffer yet */
+        return true;
+    }
+
+    /* Fiber completed synchronously (no yield) */
+    if (wasm_buf_offset != 0)
+        wasm_runtime_module_free(inst, wasm_buf_offset);
+    state->wasm_buf_offset = 0;
+
+    if (state->fiber_result < 0)
+        return false;
+    return state->fiber_result != 0;
 }
 
 /* ── Standalone spawn (owns its own module) ───────────────────────── */
 
 actor_id_t actor_spawn_wasm(runtime_t *rt, const uint8_t *wasm_buf,
                              size_t wasm_size, size_t mailbox_size,
-                             uint32_t stack_size, uint32_t heap_size) {
+                             uint32_t stack_size, uint32_t heap_size,
+                             fiber_stack_class_t fiber_stack) {
     /* Create a private factory arg */
     wasm_factory_arg_t *arg = wasm_factory_arg_create(wasm_buf, wasm_size,
-                                                       stack_size, heap_size);
+                                                       stack_size, heap_size,
+                                                       fiber_stack);
     if (!arg) return ACTOR_ID_INVALID;
 
     /* Create the actor state */
@@ -267,7 +433,8 @@ actor_id_t actor_spawn_wasm(runtime_t *rt, const uint8_t *wasm_buf,
 
 actor_id_t actor_spawn_wasm_file(runtime_t *rt, const char *path,
                                   size_t mailbox_size,
-                                  uint32_t stack_size, uint32_t heap_size) {
+                                  uint32_t stack_size, uint32_t heap_size,
+                                  fiber_stack_class_t fiber_stack) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "actor_spawn_wasm_file: cannot open %s\n", path);
@@ -298,7 +465,7 @@ actor_id_t actor_spawn_wasm_file(runtime_t *rt, const char *path,
     }
 
     actor_id_t id = actor_spawn_wasm(rt, buf, read_size, mailbox_size,
-                                      stack_size, heap_size);
+                                      stack_size, heap_size, fiber_stack);
     free(buf);
     return id;
 }

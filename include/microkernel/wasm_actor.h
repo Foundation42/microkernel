@@ -8,6 +8,17 @@
 #define WASM_DEFAULT_STACK_SIZE  8192
 #define WASM_DEFAULT_HEAP_SIZE   65536
 
+/* Fiber stack classes for cooperative yielding from WASM host calls.
+   FIBER_STACK_NONE = sync-only (Phase 12 behavior, zero overhead). */
+typedef enum {
+    FIBER_STACK_NONE   = 0,      /* No fiber (sync only) — DEFAULT */
+    FIBER_STACK_SMALL  = 32768,  /* 32 KB */
+    FIBER_STACK_MEDIUM = 65536,  /* 64 KB */
+    FIBER_STACK_LARGE  = 131072, /* 128 KB */
+} fiber_stack_class_t;
+
+#define FIBER_GUARD_SIZE 8192
+
 /* Initialize/cleanup WAMR (call once per process) */
 bool wasm_actors_init(void);
 void wasm_actors_cleanup(void);
@@ -15,12 +26,14 @@ void wasm_actors_cleanup(void);
 /* Spawn a WASM actor from a bytecode/AoT buffer (buffer is copied internally) */
 actor_id_t actor_spawn_wasm(runtime_t *rt, const uint8_t *wasm_buf,
                              size_t wasm_size, size_t mailbox_size,
-                             uint32_t stack_size, uint32_t heap_size);
+                             uint32_t stack_size, uint32_t heap_size,
+                             fiber_stack_class_t fiber_stack);
 
 /* Spawn a WASM actor from a file path */
 actor_id_t actor_spawn_wasm_file(runtime_t *rt, const char *path,
                                   size_t mailbox_size,
-                                  uint32_t stack_size, uint32_t heap_size);
+                                  uint32_t stack_size, uint32_t heap_size,
+                                  fiber_stack_class_t fiber_stack);
 
 /* Supervision integration -- use as child_spec_t fields */
 bool  wasm_actor_behavior(runtime_t *rt, actor_t *self,
@@ -35,7 +48,8 @@ typedef struct wasm_factory_arg wasm_factory_arg_t;
 wasm_factory_arg_t *wasm_factory_arg_create(const uint8_t *wasm_buf,
                                              size_t wasm_size,
                                              uint32_t stack_size,
-                                             uint32_t heap_size);
+                                             uint32_t heap_size,
+                                             fiber_stack_class_t fiber_stack);
 void wasm_factory_arg_destroy(wasm_factory_arg_t *arg);
 
 #endif /* HAVE_WASM */
