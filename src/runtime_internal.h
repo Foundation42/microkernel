@@ -157,4 +157,11 @@ void runtime_set_actor_parent(runtime_t *rt, actor_id_t child_id,
                                actor_id_t parent_id);
 void *runtime_get_actor_state(runtime_t *rt, actor_id_t id);
 
+/* Phase 11: Cross-node registry */
+void runtime_broadcast_registry(runtime_t *rt, msg_type_t type,
+                                 const void *payload, size_t payload_size);
+node_id_t runtime_get_node_id(runtime_t *rt);
+bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id);
+void name_registry_remove_by_name(runtime_t *rt, const char *name);
+
 #endif /* RUNTIME_INTERNAL_H */

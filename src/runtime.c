@@ -444,6 +444,9 @@ static size_t count_active_http_conns(runtime_t *rt) {
     return n;
 }
 
+/* Forward declaration */
+static bool handle_registry_msg(runtime_t *rt, message_t *msg);
+
 /* ── Unified poll and dispatch ─────────────────────────────────────── */
 
 static bool poll_and_dispatch(runtime_t *rt, int timeout_ms) {
@@ -535,6 +538,11 @@ static bool poll_and_dispatch(runtime_t *rt, int timeout_ms) {
             if (!tp) break;
             message_t *msg;
             while ((msg = tp->recv(tp)) != NULL) {
+                if (handle_registry_msg(rt, msg)) {
+                    message_destroy(msg);
+                    dispatched = true;
+                    continue;
+                }
                 if (!deliver_local(rt, msg->dest, msg)) {
                     message_destroy(msg);
                 }
@@ -789,6 +797,51 @@ uint32_t runtime_alloc_http_conn_id(runtime_t *rt) {
 
 http_listener_t *runtime_get_http_listeners(runtime_t *rt) {
     return rt->http_listeners;
+}
+
+/* ── Cross-node registry ───────────────────────────────────────────── */
+
+void runtime_broadcast_registry(runtime_t *rt, msg_type_t type,
+                                 const void *payload, size_t payload_size) {
+    for (size_t i = 0; i < MAX_TRANSPORTS; i++) {
+        transport_t *tp = rt->transports[i];
+        if (!tp) continue;
+        message_t *msg = message_create(ACTOR_ID_INVALID, ACTOR_ID_INVALID,
+                                         type, payload, payload_size);
+        if (msg) {
+            tp->send(tp, msg);
+            message_destroy(msg);
+        }
+    }
+}
+
+node_id_t runtime_get_node_id(runtime_t *rt) {
+    return rt->node_id;
+}
+
+/* Forward declarations for registry internals */
+bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id);
+void name_registry_remove_by_name(runtime_t *rt, const char *name);
+
+static bool handle_registry_msg(runtime_t *rt, message_t *msg) {
+    if (msg->type == MSG_NAME_REGISTER) {
+        const name_register_payload_t *p = msg->payload;
+        name_registry_insert(rt, p->name, p->actor_id);
+        return true;
+    }
+    if (msg->type == MSG_NAME_UNREGISTER) {
+        const name_unregister_payload_t *p = msg->payload;
+        name_registry_remove_by_name(rt, p->name);
+        return true;
+    }
+    return false;
+}
+
+bool actor_send_named(runtime_t *rt, const char *name, msg_type_t type,
+                      const void *payload, size_t payload_size) {
+    actor_id_t dest = actor_lookup(rt, name);
+    if (dest == ACTOR_ID_INVALID) return false;
+    return actor_send(rt, dest, type, payload, payload_size);
 }
 
 /* ── Supervision accessors ─────────────────────────────────────────── */

@@ -28,6 +28,10 @@
 /* Phase 10: Supervision */
 #define MSG_CHILD_EXIT        ((msg_type_t)0xFF000010)
 
+/* Phase 11: Cross-node registry */
+#define MSG_NAME_REGISTER     ((msg_type_t)0xFF000012)
+#define MSG_NAME_UNREGISTER   ((msg_type_t)0xFF000013)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {
@@ -65,10 +69,25 @@ bool       actor_cancel_timer(runtime_t *rt, timer_id_t id);
 bool actor_watch_fd(runtime_t *rt, int fd, uint32_t events);
 bool actor_unwatch_fd(runtime_t *rt, int fd);
 
+/* ── Cross-node registry payloads ──────────────────────────────────── */
+
+typedef struct {
+    char       name[64];
+    actor_id_t actor_id;
+} name_register_payload_t;
+
+typedef struct {
+    char name[64];
+} name_unregister_payload_t;
+
 /* ── Name registry API ─────────────────────────────────────────────── */
 
 bool       actor_register_name(runtime_t *rt, const char *name, actor_id_t id);
 actor_id_t actor_lookup(runtime_t *rt, const char *name);
+
+/* Send message by name — lookup + send in one call */
+bool actor_send_named(runtime_t *rt, const char *name, msg_type_t type,
+                      const void *payload, size_t payload_size);
 
 /* ── Logging API ───────────────────────────────────────────────────── */
 
