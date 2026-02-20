@@ -17,6 +17,7 @@ add_library(microkernel STATIC
     base64.c
     ws_frame.c
     http_conn.c
+    supervision.c
 )
 
 target_include_directories(microkernel PUBLIC

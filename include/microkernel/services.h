@@ -25,6 +25,9 @@
 #define MSG_HTTP_LISTEN_ERROR ((msg_type_t)0xFF00000E)
 #define MSG_HTTP_CONN_CLOSED  ((msg_type_t)0xFF00000F)
 
+/* Phase 10: Supervision */
+#define MSG_CHILD_EXIT        ((msg_type_t)0xFF000010)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {

@@ -152,4 +152,9 @@ void timer_platform_close(size_t slot, int fd);
 /* Drive an HTTP connection (called from runtime.c poll loop) */
 void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt);
 
+/* Phase 10: Supervision */
+void runtime_set_actor_parent(runtime_t *rt, actor_id_t child_id,
+                               actor_id_t parent_id);
+void *runtime_get_actor_state(runtime_t *rt, actor_id_t id);
+
 #endif /* RUNTIME_INTERNAL_H */

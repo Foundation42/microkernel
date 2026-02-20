@@ -18,6 +18,7 @@ idf_component_register(
         "${MK_SRC_DIR}/sha1.c"
         "${MK_SRC_DIR}/base64.c"
         "${MK_SRC_DIR}/ws_frame.c"
+        "${MK_SRC_DIR}/supervision.c"
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
     PRIV_INCLUDE_DIRS
@@ -33,5 +34,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     MAX_TIMERS=8
     MAX_FD_WATCHES=8
     NAME_REGISTRY_SIZE=16
+    MAX_SUPERVISOR_CHILDREN=8
+    MAX_RESTART_HISTORY=16
     HAVE_MBEDTLS=1
 )

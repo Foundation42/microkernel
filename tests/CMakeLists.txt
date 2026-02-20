@@ -33,6 +33,7 @@ add_microkernel_test(test_http_runtime)
 add_microkernel_test(test_http_server)
 add_microkernel_test(test_sse_server)
 add_microkernel_test(test_ws_server)
+add_microkernel_test(test_supervision)
 
 # ── Real-world tests (require network) ──────────────────────────────
 option(BUILD_REALWORLD_TESTS "Build tests requiring network" OFF)

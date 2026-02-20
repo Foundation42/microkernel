@@ -4,6 +4,7 @@
 #include "microkernel/message.h"
 #include "microkernel/scheduler.h"
 #include "microkernel/transport.h"
+#include "microkernel/supervision.h"
 #include "runtime_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -184,7 +185,10 @@ void actor_stop(runtime_t *rt, actor_id_t id) {
     uint32_t seq = actor_id_seq(id);
     if (seq == 0 || seq >= rt->max_actors) return;
     actor_t *a = rt->actors[seq];
-    if (a) a->status = ACTOR_STOPPED;
+    if (a) {
+        a->exit_reason = EXIT_KILLED;
+        a->status = ACTOR_STOPPED;
+    }
 }
 
 /* ── Internal: look up a local actor by id ─────────────────────────── */
@@ -312,6 +316,15 @@ static void cleanup_stopped(runtime_t *rt) {
         actor_t *a = rt->actors[i];
         if (a && a->status == ACTOR_STOPPED) {
             actor_id_t id = a->id;
+            /* Notify parent of child death */
+            if (a->parent != ACTOR_ID_INVALID) {
+                child_exit_payload_t exit_payload = {
+                    .child_id = id,
+                    .exit_reason = a->exit_reason
+                };
+                runtime_deliver_msg(rt, a->parent, MSG_CHILD_EXIT,
+                                    &exit_payload, sizeof(exit_payload));
+            }
             /* Clean up timers owned by this actor */
             for (size_t t = 0; t < MAX_TIMERS; t++) {
                 if (rt->timers[t].id != TIMER_ID_INVALID &&
@@ -356,7 +369,10 @@ static void cleanup_stopped(runtime_t *rt) {
 
 void runtime_step(runtime_t *rt) {
     actor_t *actor = scheduler_dequeue(&rt->scheduler);
-    if (!actor) return;
+    if (!actor) {
+        cleanup_stopped(rt);
+        return;
+    }
 
     if (actor->status == ACTOR_STOPPED) return;
 
@@ -369,6 +385,7 @@ void runtime_step(runtime_t *rt) {
         bool keep = actor->behavior(rt, actor, msg, actor->state);
         message_destroy(msg);
         if (!keep) {
+            actor->exit_reason = EXIT_NORMAL;
             actor->status = ACTOR_STOPPED;
         }
     }
@@ -772,4 +789,21 @@ uint32_t runtime_alloc_http_conn_id(runtime_t *rt) {
 
 http_listener_t *runtime_get_http_listeners(runtime_t *rt) {
     return rt->http_listeners;
+}
+
+/* ── Supervision accessors ─────────────────────────────────────────── */
+
+void runtime_set_actor_parent(runtime_t *rt, actor_id_t child_id,
+                               actor_id_t parent_id) {
+    uint32_t seq = actor_id_seq(child_id);
+    if (seq == 0 || seq >= rt->max_actors) return;
+    actor_t *a = rt->actors[seq];
+    if (a) a->parent = parent_id;
+}
+
+void *runtime_get_actor_state(runtime_t *rt, actor_id_t id) {
+    uint32_t seq = actor_id_seq(id);
+    if (seq == 0 || seq >= rt->max_actors) return NULL;
+    actor_t *a = rt->actors[seq];
+    return a ? a->state : NULL;
 }

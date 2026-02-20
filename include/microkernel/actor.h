@@ -16,6 +16,10 @@ struct actor {
     /* Scheduling: intrusive linked list */
     struct actor     *next;
     uint32_t          priority;
+
+    /* Supervision */
+    actor_id_t        parent;       /* receives MSG_CHILD_EXIT on death; 0 = unlinked */
+    uint8_t           exit_reason;  /* EXIT_NORMAL or EXIT_KILLED */
 };
 
 /* Create an actor with the given id, behavior, state, and mailbox capacity.
