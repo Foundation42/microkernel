@@ -1004,6 +1004,339 @@ static bool test_cross_device(void) {
     }
 }
 
+/* ── Test 11: HTTP Server GET 200 (self-test via loopback) ─────────── */
+
+#define HTTP_SRV_GET_PORT  19904
+#define HTTP_SRV_POST_PORT 19905
+#define SSE_SRV_PORT       19906
+#define WS_SRV_PORT        19907
+
+typedef struct {
+    int status_code;
+    bool got_request;
+    bool got_response;
+    char body[256];
+} http_srv_state_t;
+
+static bool http_srv_get_behavior(runtime_t *rt, actor_t *self,
+                                   message_t *msg, void *state) {
+    (void)self;
+    http_srv_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        actor_http_listen(rt, HTTP_SRV_GET_PORT);
+        actor_http_get(rt, "http://127.0.0.1:19904/hello");
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_REQUEST) {
+        const http_request_payload_t *p = msg->payload;
+        s->got_request = true;
+        ESP_LOGI(TAG, "Server got %s %s",
+                 http_request_method(p), http_request_path(p));
+        actor_http_respond(rt, p->conn_id, 200, NULL, 0,
+                           "hello from esp32", 16);
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_RESPONSE) {
+        const http_response_payload_t *p = msg->payload;
+        s->got_response = true;
+        s->status_code = p->status_code;
+        size_t len = p->body_size < sizeof(s->body) - 1 ?
+                     p->body_size : sizeof(s->body) - 1;
+        memcpy(s->body, http_response_body(p), len);
+        s->body[len] = '\0';
+        return false;
+    }
+
+    if (msg->type == MSG_HTTP_ERROR) {
+        const http_error_payload_t *p = msg->payload;
+        ESP_LOGE(TAG, "HTTP srv GET error: %s", p->message);
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_http_server_get(void) {
+    ESP_LOGI(TAG, "=== Test 11: HTTP Server GET 200 ===");
+
+    runtime_t *rt = runtime_init(1, 32);
+    if (!rt) return false;
+
+    http_srv_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, http_srv_get_behavior, s, NULL, 32);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_request && s->got_response &&
+              s->status_code == 200 &&
+              strstr(s->body, "hello from esp32") != NULL;
+
+    ESP_LOGI(TAG, "HTTP Server GET test %s (req=%d resp=%d status=%d body=%s)",
+             ok ? "passed" : "FAILED",
+             s->got_request, s->got_response, s->status_code, s->body);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 12: HTTP Server POST Echo (self-test via loopback) ──────── */
+
+static bool http_srv_post_behavior(runtime_t *rt, actor_t *self,
+                                    message_t *msg, void *state) {
+    (void)self;
+    http_srv_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        actor_http_listen(rt, HTTP_SRV_POST_PORT);
+        const char *hdrs[] = {"Content-Type: text/plain"};
+        actor_http_fetch(rt, "POST", "http://127.0.0.1:19905/echo",
+                         hdrs, 1, "ping", 4);
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_REQUEST) {
+        const http_request_payload_t *p = msg->payload;
+        s->got_request = true;
+        const void *body = http_request_body(p);
+        ESP_LOGI(TAG, "Server got POST, body_size=%zu", p->body_size);
+        actor_http_respond(rt, p->conn_id, 200, NULL, 0,
+                           body, p->body_size);
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_RESPONSE) {
+        const http_response_payload_t *p = msg->payload;
+        s->got_response = true;
+        s->status_code = p->status_code;
+        size_t len = p->body_size < sizeof(s->body) - 1 ?
+                     p->body_size : sizeof(s->body) - 1;
+        memcpy(s->body, http_response_body(p), len);
+        s->body[len] = '\0';
+        return false;
+    }
+
+    if (msg->type == MSG_HTTP_ERROR) {
+        const http_error_payload_t *p = msg->payload;
+        ESP_LOGE(TAG, "HTTP srv POST error: %s", p->message);
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_http_server_post(void) {
+    ESP_LOGI(TAG, "=== Test 12: HTTP Server POST Echo ===");
+
+    runtime_t *rt = runtime_init(1, 32);
+    if (!rt) return false;
+
+    http_srv_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, http_srv_post_behavior, s, NULL, 32);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_request && s->got_response &&
+              s->status_code == 200 &&
+              strcmp(s->body, "ping") == 0;
+
+    ESP_LOGI(TAG, "HTTP Server POST test %s (req=%d resp=%d status=%d body=%s)",
+             ok ? "passed" : "FAILED",
+             s->got_request, s->got_response, s->status_code, s->body);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 13: SSE Server Push (self-test via loopback) ────────────── */
+
+typedef struct {
+    http_conn_id_t srv_conn;
+    http_conn_id_t cli_conn;
+    int event_count;
+    int timer_count;
+    bool got_request;
+    char events[2][64];
+} sse_srv_state_t;
+
+static bool sse_srv_behavior(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    sse_srv_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        actor_http_listen(rt, SSE_SRV_PORT);
+        s->cli_conn = actor_sse_connect(rt, "http://127.0.0.1:19906/events");
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_REQUEST) {
+        const http_request_payload_t *p = msg->payload;
+        s->srv_conn = p->conn_id;
+        s->got_request = true;
+        actor_sse_start(rt, p->conn_id);
+        actor_set_timer(rt, 50, false);
+        return true;
+    }
+
+    if (msg->type == MSG_SSE_OPEN) {
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER) {
+        s->timer_count++;
+        if (s->timer_count == 1) {
+            actor_sse_push(rt, s->srv_conn, NULL, "event1", 6);
+            actor_sse_push(rt, s->srv_conn, NULL, "event2", 6);
+            actor_set_timer(rt, 500, false);
+        } else {
+            /* Safety timeout */
+            return false;
+        }
+        return true;
+    }
+
+    if (msg->type == MSG_SSE_EVENT) {
+        const sse_event_payload_t *p = msg->payload;
+        if (s->event_count < 2) {
+            const char *data = sse_event_data(p);
+            size_t len = p->data_size < 63 ? p->data_size : 63;
+            memcpy(s->events[s->event_count], data, len);
+            s->events[s->event_count][len] = '\0';
+            ESP_LOGI(TAG, "SSE client got event: %s",
+                     s->events[s->event_count]);
+        }
+        s->event_count++;
+        if (s->event_count >= 2) {
+            return false;
+        }
+        return true;
+    }
+
+    return true;
+}
+
+static bool test_sse_server(void) {
+    ESP_LOGI(TAG, "=== Test 13: SSE Server Push ===");
+
+    runtime_t *rt = runtime_init(1, 32);
+    if (!rt) return false;
+
+    sse_srv_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, sse_srv_behavior, s, NULL, 32);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_request && s->event_count >= 2 &&
+              strcmp(s->events[0], "event1") == 0 &&
+              strcmp(s->events[1], "event2") == 0;
+
+    ESP_LOGI(TAG, "SSE Server test %s (req=%d events=%d e0=%s e1=%s)",
+             ok ? "passed" : "FAILED",
+             s->got_request, s->event_count,
+             s->events[0], s->events[1]);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 14: WebSocket Server Echo (self-test via loopback) ──────── */
+
+typedef struct {
+    http_conn_id_t srv_conn;
+    http_conn_id_t client_conn;
+    bool got_echo;
+    char echo_msg[256];
+} ws_srv_state_t;
+
+static bool ws_srv_behavior(runtime_t *rt, actor_t *self,
+                             message_t *msg, void *state) {
+    (void)self;
+    ws_srv_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        actor_http_listen(rt, WS_SRV_PORT);
+        s->client_conn = actor_ws_connect(rt, "ws://127.0.0.1:19907/ws");
+        return true;
+    }
+
+    if (msg->type == MSG_HTTP_REQUEST) {
+        const http_request_payload_t *p = msg->payload;
+        s->srv_conn = p->conn_id;
+        actor_ws_accept(rt, p->conn_id);
+        return true;
+    }
+
+    if (msg->type == MSG_WS_OPEN) {
+        const ws_status_payload_t *p = msg->payload;
+        if (p->conn_id == s->client_conn) {
+            ESP_LOGI(TAG, "WS client connected, sending message");
+            actor_ws_send_text(rt, s->client_conn,
+                               "hello ws server", 15);
+        }
+        return true;
+    }
+
+    if (msg->type == MSG_WS_MESSAGE) {
+        const ws_message_payload_t *p = msg->payload;
+        if (p->conn_id == s->srv_conn) {
+            /* Server received message — echo back */
+            const void *data = ws_message_data(p);
+            actor_ws_send_text(rt, s->srv_conn, data, p->data_size);
+        } else if (p->conn_id == s->client_conn) {
+            /* Client received echo */
+            const char *data = ws_message_data(p);
+            size_t len = p->data_size < sizeof(s->echo_msg) - 1 ?
+                         p->data_size : sizeof(s->echo_msg) - 1;
+            memcpy(s->echo_msg, data, len);
+            s->echo_msg[len] = '\0';
+            s->got_echo = true;
+            ESP_LOGI(TAG, "WS client got echo: %s", s->echo_msg);
+            actor_ws_close(rt, s->client_conn, 1000, NULL);
+        }
+        return true;
+    }
+
+    if (msg->type == MSG_WS_CLOSED) {
+        return false;
+    }
+
+    if (msg->type == MSG_WS_ERROR) {
+        const http_error_payload_t *p = msg->payload;
+        ESP_LOGE(TAG, "WS server echo error: %s", p->message);
+        return false;
+    }
+
+    return true;
+}
+
+static bool test_ws_server(void) {
+    ESP_LOGI(TAG, "=== Test 14: WebSocket Server Echo ===");
+
+    runtime_t *rt = runtime_init(1, 32);
+    if (!rt) return false;
+
+    ws_srv_state_t *s = calloc(1, sizeof(*s));
+    actor_id_t id = actor_spawn(rt, ws_srv_behavior, s, NULL, 32);
+    actor_send(rt, id, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_echo &&
+              strcmp(s->echo_msg, "hello ws server") == 0;
+
+    ESP_LOGI(TAG, "WS Server echo test %s (echo=%d msg=%s)",
+             ok ? "passed" : "FAILED", s->got_echo, s->echo_msg);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 void app_main(void) {
@@ -1028,12 +1361,18 @@ void app_main(void) {
         if (!test_wss_echo()) pass = false;
         if (!test_multinode()) pass = false;
         if (!test_cross_device()) pass = false;
+
+        /* Server self-tests via loopback (no external dependencies) */
+        if (!test_http_server_get()) pass = false;
+        if (!test_http_server_post()) pass = false;
+        if (!test_sse_server()) pass = false;
+        if (!test_ws_server()) pass = false;
     } else {
         ESP_LOGW(TAG, "Skipping network tests (no WiFi)");
     }
 
     if (pass && wifi_ok) {
-        ESP_LOGI(TAG, "All 10 smoke tests passed!");
+        ESP_LOGI(TAG, "All 14 smoke tests passed!");
     } else if (pass) {
         ESP_LOGI(TAG, "Core tests passed (network tests skipped — no WiFi)");
     } else {
