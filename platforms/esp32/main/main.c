@@ -7,14 +7,21 @@
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <nvs_flash.h>
+#include <pthread.h>
+#include <esp_pthread.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include "microkernel/runtime.h"
 #include "microkernel/message.h"
 #include "microkernel/transport_tcp.h"
 #include "microkernel/http.h"
+#include "microkernel/wasm_actor.h"
 #include <lwip/sockets.h>
 #include "wifi_config.h"
+
+/* Embedded WASM binary (compiled from tests/wasm_modules/echo.c) */
+extern const uint8_t echo_wasm_start[] asm("_binary_echo_wasm_start");
+extern const uint8_t echo_wasm_end[]   asm("_binary_echo_wasm_end");
 
 static const char *TAG = "mk_smoke";
 
@@ -1337,6 +1344,224 @@ static bool test_ws_server(void) {
     return ok;
 }
 
+/* ── Test 15: WASM actor spawn ─────────────────────────────────────── */
+
+static bool test_wasm_spawn(void) {
+    ESP_LOGI(TAG, "=== Test 15: WASM actor spawn ===");
+
+    runtime_t *rt = runtime_init(1, 16);
+    if (!rt) return false;
+
+    size_t wasm_size = (size_t)(echo_wasm_end - echo_wasm_start);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, echo_wasm_start, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
+    bool ok = (wasm_id != ACTOR_ID_INVALID);
+    ESP_LOGI(TAG, "WASM spawn test %s (id=%" PRIu64 ")",
+             ok ? "passed" : "FAILED", (uint64_t)wasm_id);
+
+    /* Send stop signal (msg_type 0) so runtime exits */
+    if (ok) actor_send(rt, wasm_id, 0, NULL, 0);
+    runtime_run(rt);
+    runtime_destroy(rt);
+    return ok;
+}
+
+/* ── Test 16: WASM echo (PING → PONG) ─────────────────────────────── */
+
+#define WASM_MSG_PING       200
+#define WASM_MSG_PONG       201
+#define WASM_MSG_SLEEP_TEST 204
+#define WASM_MSG_RECV_TEST  205
+#define WASM_MSG_RECV_REPLY 206
+
+typedef struct {
+    actor_id_t wasm_id;
+    msg_type_t trigger_type;
+    const char *trigger_payload;
+    size_t trigger_size;
+    bool got_reply;
+    msg_type_t reply_type;
+    char reply[64];
+    size_t reply_size;
+    /* For recv test: send a second message after the first */
+    msg_type_t second_type;
+    const char *second_payload;
+    size_t second_size;
+} wasm_tester_state_t;
+
+static bool wasm_tester_behavior(runtime_t *rt, actor_t *self,
+                                  message_t *msg, void *state) {
+    (void)self;
+    wasm_tester_state_t *s = state;
+
+    if (msg->type == MSG_BOOTSTRAP) {
+        actor_send(rt, s->wasm_id, s->trigger_type,
+                   s->trigger_payload, s->trigger_size);
+        if (s->second_payload) {
+            actor_send(rt, s->wasm_id, s->second_type,
+                       s->second_payload, s->second_size);
+        }
+        return true;
+    }
+
+    /* Capture any reply from WASM actor */
+    s->got_reply = true;
+    s->reply_type = msg->type;
+    s->reply_size = msg->payload_size < sizeof(s->reply) - 1 ?
+                    msg->payload_size : sizeof(s->reply) - 1;
+    if (s->reply_size > 0 && msg->payload)
+        memcpy(s->reply, msg->payload, s->reply_size);
+    s->reply[s->reply_size] = '\0';
+    return false;
+}
+
+static bool test_wasm_echo(void) {
+    ESP_LOGI(TAG, "=== Test 16: WASM echo ===");
+
+    runtime_t *rt = runtime_init(1, 16);
+    if (!rt) return false;
+
+    size_t wasm_size = (size_t)(echo_wasm_end - echo_wasm_start);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, echo_wasm_start, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_NONE);
+    if (wasm_id == ACTOR_ID_INVALID) {
+        ESP_LOGE(TAG, "WASM spawn failed");
+        runtime_destroy(rt);
+        return false;
+    }
+
+    wasm_tester_state_t *s = calloc(1, sizeof(*s));
+    s->wasm_id = wasm_id;
+    s->trigger_type = WASM_MSG_PING;
+    s->trigger_payload = "hi";
+    s->trigger_size = 2;
+
+    actor_id_t tester = actor_spawn(rt, wasm_tester_behavior, s, NULL, 16);
+    actor_send(rt, tester, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_reply && s->reply_type == WASM_MSG_PONG &&
+              s->reply_size == 2 && memcmp(s->reply, "hi", 2) == 0;
+
+    ESP_LOGI(TAG, "WASM echo test %s (reply_type=%u reply=%s)",
+             ok ? "passed" : "FAILED",
+             (unsigned)s->reply_type, s->reply);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 17: WASM fiber sleep ─────────────────────────────────────── */
+
+static bool test_wasm_fiber_sleep(void) {
+    ESP_LOGI(TAG, "=== Test 17: WASM fiber sleep ===");
+
+    runtime_t *rt = runtime_init(1, 16);
+    if (!rt) return false;
+
+    size_t wasm_size = (size_t)(echo_wasm_end - echo_wasm_start);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, echo_wasm_start, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_SMALL);
+    if (wasm_id == ACTOR_ID_INVALID) {
+        ESP_LOGE(TAG, "WASM spawn failed");
+        runtime_destroy(rt);
+        return false;
+    }
+
+    wasm_tester_state_t *s = calloc(1, sizeof(*s));
+    s->wasm_id = wasm_id;
+    s->trigger_type = WASM_MSG_SLEEP_TEST;
+    s->trigger_payload = NULL;
+    s->trigger_size = 0;
+
+    actor_id_t tester = actor_spawn(rt, wasm_tester_behavior, s, NULL, 16);
+    actor_send(rt, tester, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_reply && s->reply_type == WASM_MSG_PONG &&
+              s->reply_size == 5 && memcmp(s->reply, "slept", 5) == 0;
+
+    ESP_LOGI(TAG, "WASM fiber sleep test %s (reply_type=%u reply=%s)",
+             ok ? "passed" : "FAILED",
+             (unsigned)s->reply_type, s->reply);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── Test 18: WASM fiber recv ──────────────────────────────────────── */
+
+static bool test_wasm_fiber_recv(void) {
+    ESP_LOGI(TAG, "=== Test 18: WASM fiber recv ===");
+
+    runtime_t *rt = runtime_init(1, 16);
+    if (!rt) return false;
+
+    size_t wasm_size = (size_t)(echo_wasm_end - echo_wasm_start);
+    actor_id_t wasm_id = actor_spawn_wasm(rt, echo_wasm_start, wasm_size, 16,
+                                           WASM_DEFAULT_STACK_SIZE,
+                                           WASM_DEFAULT_HEAP_SIZE,
+                                           FIBER_STACK_SMALL);
+    if (wasm_id == ACTOR_ID_INVALID) {
+        ESP_LOGE(TAG, "WASM spawn failed");
+        runtime_destroy(rt);
+        return false;
+    }
+
+    wasm_tester_state_t *s = calloc(1, sizeof(*s));
+    s->wasm_id = wasm_id;
+    s->trigger_type = WASM_MSG_RECV_TEST;
+    s->trigger_payload = NULL;
+    s->trigger_size = 0;
+    /* Second message: the one mk_recv will pick up */
+    s->second_type = WASM_MSG_PING;
+    s->second_payload = "hello";
+    s->second_size = 5;
+
+    actor_id_t tester = actor_spawn(rt, wasm_tester_behavior, s, NULL, 16);
+    actor_send(rt, tester, MSG_BOOTSTRAP, NULL, 0);
+    runtime_run(rt);
+
+    bool ok = s->got_reply && s->reply_type == WASM_MSG_RECV_REPLY &&
+              s->reply_size == 5 && memcmp(s->reply, "hello", 5) == 0;
+
+    ESP_LOGI(TAG, "WASM fiber recv test %s (reply_type=%u reply=%s)",
+             ok ? "passed" : "FAILED",
+             (unsigned)s->reply_type, s->reply);
+
+    runtime_destroy(rt);
+    free(s);
+    return ok;
+}
+
+/* ── WASM test runner (must run in a pthread for WAMR compatibility) ── */
+
+static void *wasm_test_runner(void *arg) {
+    bool *pass = (bool *)arg;
+
+    if (!wasm_actors_init()) {
+        ESP_LOGE(TAG, "wasm_actors_init failed!");
+        *pass = false;
+        return NULL;
+    }
+
+    if (!test_wasm_spawn()) *pass = false;
+    if (!test_wasm_echo()) *pass = false;
+    if (!test_wasm_fiber_sleep()) *pass = false;
+    if (!test_wasm_fiber_recv()) *pass = false;
+
+    wasm_actors_cleanup();
+    return NULL;
+}
+
 /* ── Entry point ───────────────────────────────────────────────────── */
 
 void app_main(void) {
@@ -1349,6 +1574,22 @@ void app_main(void) {
 
     if (!test_pingpong()) pass = false;
     if (!test_timer()) pass = false;
+
+    /* WASM tests (no network needed).
+       Run in a pthread because WAMR's ESP-IDF platform layer calls
+       pthread_self() internally, which asserts if the calling task
+       wasn't created via pthread_create(). */
+    {
+        bool wasm_pass = true;
+        esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
+        pcfg.stack_size = 16384;
+        esp_pthread_set_cfg(&pcfg);
+
+        pthread_t wasm_thread;
+        pthread_create(&wasm_thread, NULL, wasm_test_runner, &wasm_pass);
+        pthread_join(wasm_thread, NULL);
+        if (!wasm_pass) pass = false;
+    }
 
     /* Network tests require WiFi (for lwIP network stack) */
     bool wifi_ok = wifi_init();
@@ -1372,9 +1613,9 @@ void app_main(void) {
     }
 
     if (pass && wifi_ok) {
-        ESP_LOGI(TAG, "All 14 smoke tests passed!");
+        ESP_LOGI(TAG, "All 18 smoke tests passed!");
     } else if (pass) {
-        ESP_LOGI(TAG, "Core tests passed (network tests skipped — no WiFi)");
+        ESP_LOGI(TAG, "Core + WASM tests passed (network tests skipped — no WiFi)");
     } else {
         ESP_LOGE(TAG, "Some smoke tests FAILED!");
     }

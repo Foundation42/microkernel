@@ -19,11 +19,12 @@ idf_component_register(
         "${MK_SRC_DIR}/base64.c"
         "${MK_SRC_DIR}/ws_frame.c"
         "${MK_SRC_DIR}/supervision.c"
+        "${MK_SRC_DIR}/wasm_actor.c"
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
     PRIV_INCLUDE_DIRS
         "${MK_SRC_DIR}"
-    REQUIRES microkernel_hal
+    REQUIRES microkernel_hal wamr
 )
 
 # ESP32 has ~280 KB heap — shrink embedded pools to fit
@@ -37,4 +38,5 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     MAX_SUPERVISOR_CHILDREN=8
     MAX_RESTART_HISTORY=16
     HAVE_MBEDTLS=1
+    HAVE_WASM=1
 )

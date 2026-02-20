@@ -10,7 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ucontext.h>
+
+#if defined(HAVE_UCONTEXT)
+  #include <ucontext.h>
+#elif defined(ESP_PLATFORM)
+  #include "fiber_xtensa.h"
+#endif
 
 /* ── Factory arg (owns module + buffer copy) ──────────────────────── */
 
@@ -35,8 +40,13 @@ typedef struct {
     uint8_t             *module_buf;       /* only valid if owns_module */
 
     /* Fiber support */
+#if defined(HAVE_UCONTEXT)
     ucontext_t    fiber_ctx;        /* saved fiber context */
     ucontext_t    caller_ctx;       /* saved caller context (behavior fn) */
+#elif defined(ESP_PLATFORM)
+    fiber_context_t fiber_ctx;      /* saved fiber context */
+    fiber_context_t caller_ctx;     /* saved caller context (behavior fn) */
+#endif
     uint8_t      *fiber_stack;      /* malloc'd native stack, NULL if sync-only */
     size_t        fiber_stack_size;
     bool          fiber_yielded;    /* true if fiber suspended mid-execution */
@@ -83,7 +93,11 @@ static int32_t mk_sleep_ms_native(wasm_exec_env_t env, int32_t ms) {
 
     actor_set_timer(s->rt, (uint64_t)ms, false);
     s->fiber_yielded = true;
+#if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
+#elif defined(ESP_PLATFORM)
+    fiber_switch(&s->fiber_ctx, &s->caller_ctx);
+#endif
     /* Resumed by behavior after timer fires */
     return 0;
 }
@@ -97,7 +111,11 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
 
     s->recv_msg = NULL;
     s->fiber_yielded = true;
+#if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
+#elif defined(ESP_PLATFORM)
+    fiber_switch(&s->fiber_ctx, &s->caller_ctx);
+#endif
     /* Resumed by behavior when a message arrives */
 
     if (!s->recv_msg)
@@ -185,6 +203,7 @@ void wasm_factory_arg_destroy(wasm_factory_arg_t *arg) {
 
 /* ── Fiber entry point ────────────────────────────────────────────── */
 
+#if defined(HAVE_UCONTEXT)
 /* makecontext only guarantees int-sized args. Split pointer into two. */
 static void fiber_entry(unsigned int lo, unsigned int hi) {
     uintptr_t addr = ((uintptr_t)hi << 32) | (uintptr_t)lo;
@@ -205,6 +224,29 @@ static void fiber_entry(unsigned int lo, unsigned int hi) {
     state->fiber_yielded = false;
     /* Returns to caller_ctx via uc_link */
 }
+#elif defined(ESP_PLATFORM)
+static void fiber_entry_esp(void *arg) {
+    wasm_actor_state_t *state = (wasm_actor_state_t *)arg;
+
+    bool ok = wasm_runtime_call_wasm(state->exec_env,
+                                      state->handle_message_fn, 5,
+                                      state->pending_argv);
+    if (ok) {
+        state->fiber_result = state->pending_argv[0] != 0 ? 1 : 0;
+    } else {
+        const char *exception = wasm_runtime_get_exception(state->instance);
+        fprintf(stderr, "wasm fiber: trap: %s\n",
+                exception ? exception : "(unknown)");
+        state->fiber_result = -1;
+    }
+
+    state->fiber_yielded = false;
+    /* No uc_link on ESP32 — explicitly switch back to caller */
+    fiber_switch(&state->fiber_ctx, &state->caller_ctx);
+    /* Never reached */
+    for (;;) {}
+}
+#endif
 
 /* ── Factory function (creates per-actor instance) ────────────────── */
 
@@ -299,7 +341,11 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     if (state->fiber_yielded) {
         /* Stash message for mk_recv if the fiber was blocked on recv */
         state->recv_msg = msg;
+#if defined(HAVE_UCONTEXT)
         swapcontext(&state->caller_ctx, &state->fiber_ctx);
+#elif defined(ESP_PLATFORM)
+        fiber_switch(&state->caller_ctx, &state->fiber_ctx);
+#endif
 
         if (state->fiber_yielded) {
             /* Fiber yielded again (another blocking call) — keep alive */
@@ -365,6 +411,7 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     state->fiber_result = 1;
     state->fiber_yielded = false;
 
+#if defined(HAVE_UCONTEXT)
     if (getcontext(&state->fiber_ctx) == -1) {
         fprintf(stderr, "wasm_actor_behavior: getcontext failed\n");
         if (wasm_buf_offset != 0)
@@ -382,6 +429,14 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     makecontext(&state->fiber_ctx, (void (*)(void))fiber_entry, 2, lo, hi);
 
     swapcontext(&state->caller_ctx, &state->fiber_ctx);
+#elif defined(ESP_PLATFORM)
+    fiber_init(&state->fiber_ctx, state->fiber_stack,
+               state->fiber_stack_size, fiber_entry_esp, state);
+    /* Reset caller context for fresh switch */
+    memset(&state->caller_ctx, 0, sizeof(state->caller_ctx));
+    state->caller_ctx.started = true;
+    fiber_switch(&state->caller_ctx, &state->fiber_ctx);
+#endif
 
     if (state->fiber_yielded) {
         /* Fiber yielded — keep alive, don't free WASM buffer yet */

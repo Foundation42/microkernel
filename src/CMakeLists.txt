@@ -78,7 +78,7 @@ if(ENABLE_WASM)
 
         target_sources(microkernel PRIVATE wasm_actor.c)
         target_link_libraries(microkernel PUBLIC vmlib m)
-        target_compile_definitions(microkernel PUBLIC HAVE_WASM=1)
+        target_compile_definitions(microkernel PUBLIC HAVE_WASM=1 HAVE_UCONTEXT=1)
         target_include_directories(microkernel PRIVATE
             ${WAMR_ROOT_DIR}/core/iwasm/include)
         set(HAVE_WASM TRUE CACHE INTERNAL "")
