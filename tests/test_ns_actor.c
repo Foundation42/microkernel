@@ -395,6 +395,51 @@ static int test_path_cleanup_on_death(void) {
     return 0;
 }
 
+/* ── Test 14: node identity paths are auto-registered ──────────────── */
+
+static int test_node_identity_registered(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    actor_id_t ns_id = ns_actor_init(rt);
+    ASSERT_NE(ns_id, ACTOR_ID_INVALID);
+
+    /* /sys/ns should resolve to ns actor */
+    ASSERT_EQ(actor_lookup(rt, "/sys/ns"), ns_id);
+
+    /* /node/<identity> should resolve to ns actor */
+    char node_path[NS_PATH_MAX];
+    snprintf(node_path, NS_PATH_MAX, "/node/%s", mk_node_identity());
+    ASSERT_EQ(actor_lookup(rt, node_path), ns_id);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── Test 15: ns_list_paths direct access ──────────────────────────── */
+
+static int test_ns_list_paths_direct(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    ns_actor_init(rt);
+
+    actor_id_t a = actor_spawn(rt, noop_behavior, NULL, NULL, 16);
+    actor_register_name(rt, "/app/svc1", a);
+
+    char buf[512];
+    size_t n = ns_list_paths(rt, "/app/", buf, sizeof(buf));
+    ASSERT(n > 0);
+    buf[n] = '\0';
+    ASSERT(strstr(buf, "/app/svc1=") != NULL);
+
+    /* Empty prefix lists all paths including auto-registered ones */
+    n = ns_list_paths(rt, "", buf, sizeof(buf));
+    ASSERT(n > 0);
+    buf[n] = '\0';
+    ASSERT(strstr(buf, "/sys/ns=") != NULL);
+    ASSERT(strstr(buf, "/node/") != NULL);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
 /* ── main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -412,5 +457,7 @@ int main(void) {
     RUN_TEST(test_path_before_ns_init);
     RUN_TEST(test_transparent_mount_lookup);
     RUN_TEST(test_path_cleanup_on_death);
+    RUN_TEST(test_node_identity_registered);
+    RUN_TEST(test_ns_list_paths_direct);
     TEST_REPORT();
 }

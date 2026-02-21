@@ -82,4 +82,13 @@ int ns_call(runtime_t *rt, msg_type_t type,
             const void *payload, size_t payload_size,
             ns_reply_t *reply);
 
+/* Node identity — stable human-readable name.
+   Linux: MK_NODE_NAME env var or "linux-XXXX" (hostname hash).
+   ESP32: "esp32-AABBCC" (efuse MAC). */
+const char *mk_node_identity(void);
+
+/* Direct-access path listing. Writes "path=id\n" pairs matching prefix.
+   Returns bytes written. */
+size_t ns_list_paths(runtime_t *rt, const char *prefix, char *buf, size_t buf_size);
+
 #endif /* MICROKERNEL_NAMESPACE_H */

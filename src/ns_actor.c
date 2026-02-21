@@ -278,6 +278,13 @@ actor_id_t ns_actor_init(runtime_t *rt) {
     }
 
     runtime_set_ns_state(rt, s);
+
+    /* Register node identity paths */
+    char node_path[NS_PATH_MAX];
+    snprintf(node_path, NS_PATH_MAX, "/node/%s", mk_node_identity());
+    ns_path_register(s, node_path, id);
+    ns_path_register(s, "/sys/ns", id);
+
     actor_register_name(rt, "ns", id);
     return id;
 }
@@ -302,6 +309,24 @@ void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
     ns_state_t *s = runtime_get_ns_state(rt);
     if (!s) return;
     ns_path_remove_actor(s, id);
+}
+
+size_t ns_list_paths(runtime_t *rt, const char *prefix, char *buf, size_t buf_size) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s || !buf || buf_size == 0) return 0;
+    size_t prefix_len = prefix ? strlen(prefix) : 0;
+    size_t off = 0;
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (!s->paths[i].occupied) continue;
+        if (prefix_len > 0 &&
+            strncmp(s->paths[i].path, prefix, prefix_len) != 0)
+            continue;
+        int n = snprintf(buf + off, buf_size - off, "%s=%llu\n",
+                         s->paths[i].path,
+                         (unsigned long long)s->paths[i].actor_id);
+        if (n > 0 && (size_t)n < buf_size - off) off += (size_t)n;
+    }
+    return off;
 }
 
 /* ── Waiter actor for synchronous ns_call ──────────────────────────── */

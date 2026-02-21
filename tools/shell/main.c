@@ -6,6 +6,7 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/wasm_actor.h"
+#include "microkernel/namespace.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,6 +187,8 @@ int main(int argc, char *argv[]) {
         wasm_actors_cleanup();
         return 1;
     }
+
+    ns_actor_init(rt);
 
     /* Spawn shell WASM actor from file */
     actor_id_t shell = actor_spawn_wasm_file(rt, wasm_path, 32,

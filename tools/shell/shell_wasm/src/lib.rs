@@ -39,6 +39,12 @@ extern "C" {
         buf: *mut u8, buf_size: i32,
         status_out: *mut u32, size_out: *mut u32,
     ) -> i32;
+    fn mk_node_name(buf: *mut u8, buf_size: i32) -> i32;
+    fn mk_ns_list(
+        prefix: *const u8, prefix_len: i32,
+        buf: *mut u8, buf_size: i32,
+        size_out: *mut u32,
+    ) -> i32;
 }
 
 const ACTOR_ID_INVALID: i64 = 0;
@@ -186,16 +192,55 @@ fn print_msg_payload(buf: &[u8], size: u32) {
     }
 }
 
+fn cmd_whoami() {
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let len = unsafe { mk_node_name(input_buf.as_mut_ptr(), input_buf.len() as i32) };
+    if len > 0 {
+        let n = core::cmp::min(len as usize, input_buf.len());
+        print_str("/node/");
+        print(&input_buf[..n]);
+        print_str("\n");
+    }
+    let id = unsafe { mk_self() };
+    print_str("Actor ID: ");
+    print_u64(id as u64);
+    print_str("\n");
+}
+
+fn cmd_ns_list(prefix: &[u8]) {
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let mut size_out: u32 = 0;
+    let rc = unsafe {
+        mk_ns_list(
+            prefix.as_ptr(), prefix.len() as i32,
+            file_buf.as_mut_ptr(), file_buf.len() as i32,
+            &mut size_out,
+        )
+    };
+    if rc < 0 {
+        print_str("error: ns_list failed\n");
+        return;
+    }
+    if size_out == 0 {
+        print_str("(empty)\n");
+        return;
+    }
+    let len = core::cmp::min(size_out as usize, file_buf.len());
+    print(&file_buf[..len]);
+}
+
 fn cmd_help() {
     print_str("Commands:\n");
     print_str("  help                              Show this help\n");
     print_str("  list                              List active actors\n");
+    print_str("  ls /prefix                        List namespace entries by prefix\n");
     print_str("  load <path-or-url>                Load WASM actor from file or URL\n");
     print_str("  send <name-or-id> <type> [data]   Send message to actor\n");
     print_str("  call <name-or-id> <type> [data]   Send and wait for reply (5s)\n");
     print_str("  stop <name-or-id>                 Stop an actor\n");
     print_str("  register <name>                   Register self by name\n");
     print_str("  lookup <name>                     Lookup actor by name\n");
+    print_str("  whoami                            Show node identity and actor ID\n");
     print_str("  self                              Print own actor ID\n");
     print_str("  exit                              Shut down\n");
 }
@@ -537,8 +582,16 @@ fn dispatch_command(line: &[u8]) {
 
     if cmd == b"help" || cmd == b"?" {
         cmd_help();
-    } else if cmd == b"list" || cmd == b"ls" {
+    } else if cmd == b"list" {
         cmd_list();
+    } else if cmd == b"ls" {
+        if !arg.is_empty() && arg[0] == b'/' {
+            cmd_ns_list(arg);
+        } else {
+            cmd_list();
+        }
+    } else if cmd == b"whoami" {
+        cmd_whoami();
     } else if cmd == b"load" {
         cmd_load(arg);
     } else if cmd == b"send" {

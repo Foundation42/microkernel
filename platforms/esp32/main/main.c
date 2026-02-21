@@ -18,6 +18,7 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/wasm_actor.h"
+#include "microkernel/namespace.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1808,6 +1809,8 @@ static void *shell_runner(void *arg) {
         close(client_fd);
         return NULL;
     }
+
+    ns_actor_init(rt);
 
     /* Spawn shell WASM actor from embedded binary */
     size_t shell_size = (size_t)(shell_wasm_end - shell_wasm_start);

@@ -6,6 +6,7 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/http.h"
+#include "microkernel/namespace.h"
 #include "wasm_export.h"
 #include <unistd.h>
 
@@ -363,6 +364,30 @@ static int32_t mk_http_get_native(wasm_exec_env_t env, uint8_t *url,
     }
 }
 
+static int32_t mk_node_name_native(wasm_exec_env_t env,
+                                     uint8_t *buf, int32_t buf_size) {
+    (void)env;
+    const char *name = mk_node_identity();
+    int len = (int)strlen(name);
+    int copy = len < buf_size ? len : buf_size;
+    if (copy > 0) memcpy(buf, name, copy);
+    return len;
+}
+
+static int32_t mk_ns_list_native(wasm_exec_env_t env,
+                                   uint8_t *prefix, int32_t prefix_len,
+                                   uint8_t *buf, int32_t buf_size,
+                                   uint32_t *size_out) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    char pfx[NS_PATH_MAX];
+    int pn = prefix_len < (int)(NS_PATH_MAX - 1) ? prefix_len : (int)(NS_PATH_MAX - 1);
+    if (pn > 0 && prefix) memcpy(pfx, prefix, pn);
+    pfx[pn] = '\0';
+    size_t written = ns_list_paths(s->rt, pfx, (char *)buf, (size_t)buf_size);
+    *size_out = (uint32_t)written;
+    return 0;
+}
+
 /* WAMR's NativeSymbol uses void* for func_ptr; suppress pedantic warning */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
@@ -382,6 +407,8 @@ static NativeSymbol native_symbols[] = {
     { "mk_lookup",     mk_lookup_native,     "(*~)I",       NULL },
     { "mk_read_file",  mk_read_file_native,  "(*~*~*)i",    NULL },
     { "mk_http_get",   mk_http_get_native,   "(*~*~**)i",   NULL },
+    { "mk_node_name", mk_node_name_native, "(*~)i",       NULL },
+    { "mk_ns_list",   mk_ns_list_native,   "(*~*~*)i",    NULL },
 };
 #pragma GCC diagnostic pop
 

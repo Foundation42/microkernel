@@ -19,6 +19,7 @@ add_library(microkernel STATIC
     http_conn.c
     supervision.c
     ns_actor.c
+    node_identity.c
 )
 
 target_include_directories(microkernel PUBLIC
