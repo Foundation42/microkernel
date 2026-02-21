@@ -11,6 +11,9 @@ scheduler with integrated I/O polling.
 - **Supervision trees** -- one-for-one, one-for-all, rest-for-one restart strategies with rate limiting
 - **Multi-node IPC** -- Unix domain sockets and TCP transport with binary wire protocol
 - **Cross-node name registry** -- location-transparent `actor_send_named()` across nodes
+- **Hierarchical namespace** -- `/`-prefixed path table, mount points, cross-node path sync
+- **Dynamic node interconnection** -- `mount` protocol with hello handshake, automatic registry sync
+- **Capability advertisement** -- nodes report platform, features, and resource counts on request
 - **Networking** -- TCP, UDP, DNS resolution via getaddrinfo
 - **HTTP client/server** -- GET, POST, chunked transfer, request routing, response building
 - **SSE client/server** -- event stream parsing and server push
@@ -30,7 +33,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-28 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+31 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules. The WAMR submodule auto-initializes on first build.
 
@@ -193,9 +196,10 @@ The shell itself fits in a single 64KB WASM page (`#![no_std]`, static buffers,
 no allocator). A C console actor bridges TCP I/O into the actor message loop.
 On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 
-Commands: `help`, `list`, `self`, `load <path-or-url>`,
+Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
 `send <name-or-id> <type> [payload]`, `call <name-or-id> <type> [payload]`,
-`stop <name-or-id>`, `register <name>`, `lookup <name>`, `exit`
+`stop <name-or-id>`, `register <name>`, `lookup <name>`,
+`mount <host>[:<port>]`, `caps [target]`, `exit`
 
 Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
 get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
@@ -215,10 +219,12 @@ The same binary runs on both Linux and ESP32 -- a single 64KB WASM page via
 
 ```
 include/microkernel/    Public headers (types, runtime, actor, message, services,
-                        transport, http, mk_socket, supervision, wasm_actor)
+                        transport, http, mk_socket, supervision, wasm_actor,
+                        namespace)
 src/                    Implementation (runtime, actors, transports, HTTP state
-                        machine, supervision, wasm_actor, wire format, utilities)
-tests/                  28 unit/integration tests + realworld tests + benchmarks
+                        machine, supervision, wasm_actor, namespace, wire format,
+                        utilities)
+tests/                  31 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (echo.c)
 tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
