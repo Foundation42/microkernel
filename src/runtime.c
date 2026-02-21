@@ -845,6 +845,14 @@ node_id_t runtime_get_node_id(runtime_t *rt) {
     return rt->node_id;
 }
 
+size_t runtime_get_max_actors(runtime_t *rt) {
+    return rt ? rt->max_actors : 0;
+}
+
+size_t runtime_get_transport_count(runtime_t *rt) {
+    return rt ? rt->transport_count : 0;
+}
+
 /* Forward declarations for registry internals */
 bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id);
 void name_registry_remove_by_name(runtime_t *rt, const char *name);

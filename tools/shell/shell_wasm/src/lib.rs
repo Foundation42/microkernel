@@ -45,6 +45,7 @@ extern "C" {
         buf: *mut u8, buf_size: i32,
         size_out: *mut u32,
     ) -> i32;
+    fn mk_reverse_lookup(id: i64, buf: *mut u8, buf_size: i32) -> i32;
 }
 
 const ACTOR_ID_INVALID: i64 = 0;
@@ -56,6 +57,8 @@ const MSG_SPAWN_RESPONSE: u32 = 103;
 const MSG_SPAWN_REQUEST_NAMED: u32 = 104;
 const MSG_MOUNT_REQUEST: u32 = 105;
 const MSG_MOUNT_RESPONSE: u32 = 106;
+const MSG_CAPS_REQUEST: u32 = 0xFF00001D;
+const MSG_CAPS_REPLY: u32 = 0xFF00001E;
 
 // Buffer sizes
 const INPUT_BUF_SIZE: usize = 1024;
@@ -256,6 +259,7 @@ fn cmd_help() {
     print_str("  register <name>                   Register self by name\n");
     print_str("  lookup <name>                     Lookup actor by name\n");
     print_str("  mount <host>[:<port>]             Connect to remote node (default port 4200)\n");
+    print_str("  caps [target]                    Query node capabilities\n");
     print_str("  whoami                            Show node identity and actor ID\n");
     print_str("  self                              Print own actor ID\n");
     print_str("  exit                              Shut down\n");
@@ -272,9 +276,20 @@ fn cmd_list() {
     print_str("Active actors (");
     print_u64(count as u64);
     print_str("):\n");
+    let mut name_buf = [0u8; 128];
     for i in 0..count as usize {
         print_str("  ");
         print_u64(ids[i] as u64);
+        let len = unsafe {
+            mk_reverse_lookup(ids[i], name_buf.as_mut_ptr(), name_buf.len() as i32)
+        };
+        if len > 0 {
+            print_str("  ");
+            let n = core::cmp::min(len as usize, name_buf.len());
+            print(&name_buf[..n]);
+        } else {
+            print_str("  (unnamed)");
+        }
         print_str("\n");
     }
 }
@@ -652,6 +667,91 @@ fn cmd_mount(arg: &[u8]) {
     }
 }
 
+fn cmd_caps(arg: &[u8]) {
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+
+    // Determine target: if no arg, build /node/<identity>/caps
+    let target = if arg.is_empty() {
+        let len = unsafe { mk_node_name(input_buf.as_mut_ptr(), input_buf.len() as i32) };
+        if len <= 0 {
+            print_str("error: cannot get node identity\n");
+            return;
+        }
+        let n = core::cmp::min(len as usize, input_buf.len());
+        // Build path in FILE_BUF
+        let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+        let prefix = b"/node/";
+        let suffix = b"/caps";
+        let total = prefix.len() + n + suffix.len();
+        if total > file_buf.len() {
+            print_str("error: path too long\n");
+            return;
+        }
+        file_buf[..prefix.len()].copy_from_slice(prefix);
+        file_buf[prefix.len()..prefix.len() + n].copy_from_slice(&input_buf[..n]);
+        file_buf[prefix.len() + n..total].copy_from_slice(suffix);
+        let path = &file_buf[..total];
+        let id = unsafe { mk_lookup(path.as_ptr(), path.len() as i32) };
+        if id == ACTOR_ID_INVALID {
+            print_str("error: caps actor not found at ");
+            print(path);
+            print_str("\n");
+            return;
+        }
+        id
+    } else {
+        match resolve_target(arg) {
+            Some(v) => v,
+            None => {
+                print_str("error: unknown target '");
+                print(arg);
+                print_str("'\n");
+                return;
+            }
+        }
+    };
+
+    // Send MSG_CAPS_REQUEST
+    let rc = unsafe { mk_send(target, MSG_CAPS_REQUEST as i32, core::ptr::null(), 0) };
+    if rc == 0 {
+        print_str("error: send failed\n");
+        return;
+    }
+
+    // Wait for MSG_CAPS_REPLY with 5s timeout
+    let mut recv_type: u32 = 0;
+    let mut recv_size: u32 = 0;
+    let mut recv_source: i64 = 0;
+    let rc = unsafe {
+        mk_recv_timeout(
+            &mut recv_type,
+            input_buf.as_mut_ptr(),
+            input_buf.len() as i32,
+            &mut recv_size,
+            &mut recv_source,
+            5000,
+        )
+    };
+
+    if rc == -2 {
+        print_str("Timeout (5s)\n");
+        return;
+    }
+    if rc < 0 {
+        print_str("error: recv failed\n");
+        return;
+    }
+
+    if recv_type == MSG_CAPS_REPLY {
+        let len = core::cmp::min(recv_size as usize, input_buf.len());
+        print(&input_buf[..len]);
+    } else {
+        print_str("Unexpected reply type=");
+        print_u64(recv_type as u64);
+        print_str("\n");
+    }
+}
+
 fn dispatch_command(line: &[u8]) {
     let trimmed = trim(line);
     if trimmed.is_empty() {
@@ -688,6 +788,8 @@ fn dispatch_command(line: &[u8]) {
         cmd_self_id();
     } else if cmd == b"mount" {
         cmd_mount(arg);
+    } else if cmd == b"caps" {
+        cmd_caps(arg);
     } else if cmd == b"exit" || cmd == b"quit" {
         // Handled by caller — won't reach here
     } else {
@@ -742,6 +844,12 @@ pub extern "C" fn handle_message(
 
             if recv_type == MSG_MOUNT_RESPONSE {
                 // Mount response handled inline (cmd_mount uses mk_recv_timeout)
+                // If we get here, it's a stale response — just display it
+                continue;
+            }
+
+            if recv_type == MSG_CAPS_REPLY {
+                // Caps reply handled inline (cmd_caps uses mk_recv_timeout)
                 // If we get here, it's a stale response — just display it
                 continue;
             }

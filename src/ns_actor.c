@@ -315,6 +315,22 @@ actor_id_t ns_lookup_path(runtime_t *rt, const char *path) {
     return ns_path_lookup(s, path);
 }
 
+size_t ns_reverse_lookup_path(runtime_t *rt, actor_id_t id,
+                              char *buf, size_t buf_size) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s || !buf || buf_size == 0) return 0;
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (s->paths[i].occupied && s->paths[i].actor_id == id) {
+            size_t len = strlen(s->paths[i].path);
+            if (len >= buf_size) len = buf_size - 1;
+            memcpy(buf, s->paths[i].path, len);
+            buf[len] = '\0';
+            return len;
+        }
+    }
+    return 0;
+}
+
 void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
     ns_state_t *s = runtime_get_ns_state(rt);
     if (!s) return;

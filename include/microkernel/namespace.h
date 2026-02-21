@@ -75,6 +75,11 @@ int        ns_register_path(runtime_t *rt, const char *path, actor_id_t id);
 actor_id_t ns_lookup_path(runtime_t *rt, const char *path);
 void       ns_deregister_actor_paths(runtime_t *rt, actor_id_t id);
 
+/* Reverse lookup: find first path registered to actor ID.
+   Returns path length (0 if not found or ns_state is NULL). */
+size_t     ns_reverse_lookup_path(runtime_t *rt, actor_id_t id,
+                                  char *buf, size_t buf_size);
+
 /* Synchronous call to namespace actor (waiter actor pattern).
    Caller provides MSG_NS_* type + payload, gets ns_reply_t back.
    Only safe from outside the scheduler (init code, tests). */
@@ -115,6 +120,9 @@ typedef struct {
 
 int ns_mount_connect(runtime_t *rt, const char *host, uint16_t port,
                      mount_result_t *result);
+
+/* Capability advertisement actor */
+actor_id_t caps_actor_init(runtime_t *rt);
 
 #define MK_MOUNT_PORT 4200
 

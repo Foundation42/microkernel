@@ -374,6 +374,13 @@ static int32_t mk_node_name_native(wasm_exec_env_t env,
     return len;
 }
 
+static int32_t mk_reverse_lookup_native(wasm_exec_env_t env, int64_t id,
+                                          uint8_t *buf, int32_t buf_size) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    return (int32_t)actor_reverse_lookup(s->rt, (actor_id_t)id,
+                                          (char *)buf, (size_t)buf_size);
+}
+
 static int32_t mk_ns_list_native(wasm_exec_env_t env,
                                    uint8_t *prefix, int32_t prefix_len,
                                    uint8_t *buf, int32_t buf_size,
@@ -409,6 +416,7 @@ static NativeSymbol native_symbols[] = {
     { "mk_http_get",   mk_http_get_native,   "(*~*~**)i",   NULL },
     { "mk_node_name", mk_node_name_native, "(*~)i",       NULL },
     { "mk_ns_list",   mk_ns_list_native,   "(*~*~*)i",    NULL },
+    { "mk_reverse_lookup", mk_reverse_lookup_native, "(I*~)i", NULL },
 };
 #pragma GCC diagnostic pop
 

@@ -20,6 +20,7 @@ add_library(microkernel STATIC
     supervision.c
     ns_actor.c
     node_identity.c
+    caps_actor.c
 )
 
 target_include_directories(microkernel PUBLIC

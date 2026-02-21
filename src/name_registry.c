@@ -119,3 +119,24 @@ void name_registry_deregister_actor(runtime_t *rt, actor_id_t id) {
     /* Also clean up any /-prefixed paths in the namespace actor */
     ns_deregister_actor_paths(rt, id);
 }
+
+size_t actor_reverse_lookup(runtime_t *rt, actor_id_t id,
+                            char *buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return 0;
+
+    /* Scan flat name registry */
+    name_entry_t *reg = runtime_get_name_registry(rt);
+    size_t cap = runtime_get_name_registry_size();
+    for (size_t i = 0; i < cap; i++) {
+        if (reg[i].occupied && reg[i].actor_id == id) {
+            size_t len = strlen(reg[i].name);
+            if (len >= buf_size) len = buf_size - 1;
+            memcpy(buf, reg[i].name, len);
+            buf[len] = '\0';
+            return len;
+        }
+    }
+
+    /* Try namespace path table */
+    return ns_reverse_lookup_path(rt, id, buf, buf_size);
+}

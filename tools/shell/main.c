@@ -232,6 +232,7 @@ int main(int argc, char *argv[]) {
     const char *port_env = getenv("MK_MOUNT_PORT");
     if (port_env && port_env[0]) mount_port = (uint16_t)atoi(port_env);
     ns_mount_listen(rt, mount_port);
+    caps_actor_init(rt);
 
     /* Spawn shell WASM actor from file */
     actor_id_t shell = actor_spawn_wasm_file(rt, wasm_path, 32,

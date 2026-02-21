@@ -1850,6 +1850,7 @@ static void *shell_runner(void *arg) {
 
     ns_actor_init(rt);
     ns_mount_listen(rt, MK_MOUNT_PORT);
+    caps_actor_init(rt);
 
     /* Spawn shell WASM actor from embedded binary */
     size_t shell_size = (size_t)(shell_wasm_end - shell_wasm_start);

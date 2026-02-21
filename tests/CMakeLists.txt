@@ -37,6 +37,7 @@ add_microkernel_test(test_supervision)
 add_microkernel_test(test_distributed_registry)
 add_microkernel_test(test_ns_actor)
 add_microkernel_test(test_ns_remote)
+add_microkernel_test(test_caps_actor)
 
 # Phase 12: WASM actor test
 if(HAVE_WASM)
