@@ -35,6 +35,7 @@ add_microkernel_test(test_sse_server)
 add_microkernel_test(test_ws_server)
 add_microkernel_test(test_supervision)
 add_microkernel_test(test_distributed_registry)
+add_microkernel_test(test_ns_actor)
 
 # Phase 12: WASM actor test
 if(HAVE_WASM)

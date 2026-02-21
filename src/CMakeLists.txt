@@ -18,6 +18,7 @@ add_library(microkernel STATIC
     ws_frame.c
     http_conn.c
     supervision.c
+    ns_actor.c
 )
 
 target_include_directories(microkernel PUBLIC
