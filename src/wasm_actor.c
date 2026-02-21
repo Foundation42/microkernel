@@ -14,7 +14,7 @@
 #if defined(HAVE_UCONTEXT)
   #include <ucontext.h>
 #elif defined(ESP_PLATFORM)
-  #include "fiber_xtensa.h"
+  #include "fiber_esp.h"
 #endif
 
 /* ── Factory arg (owns module + buffer copy) ──────────────────────── */

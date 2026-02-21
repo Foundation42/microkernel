@@ -1,5 +1,12 @@
-#ifndef FIBER_XTENSA_H
-#define FIBER_XTENSA_H
+/*
+ * fiber_esp.h — Architecture-neutral fiber API for ESP32 platforms.
+ *
+ * Used by both Xtensa (ESP32-S3, etc.) and RISC-V (ESP32-C6, etc.) targets.
+ * The implementation is provided by fiber_xtensa.c/.S or fiber_riscv.c/.S
+ * depending on the target architecture.
+ */
+#ifndef FIBER_ESP_H
+#define FIBER_ESP_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,4 +33,4 @@ void fiber_switch(fiber_context_t *from, fiber_context_t *to);
 /* Assembly stub: switch SP and call entry(arg). Never returns. */
 extern void _fiber_start_asm(void *new_sp, void (*entry)(void *), void *arg);
 
-#endif /* FIBER_XTENSA_H */
+#endif /* FIBER_ESP_H */

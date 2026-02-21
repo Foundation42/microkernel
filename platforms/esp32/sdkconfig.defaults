@@ -1,8 +1,19 @@
+# Custom partition table: 1.94 MB app partition (WAMR needs >1 MB on RISC-V)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
 CONFIG_VFS_SUPPORT_SELECT=y
 CONFIG_LWIP_USE_ONLY_LWIP_SELECT=n
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+
+# RISC-V targets (C6/H2) have a hardware stack guard that faults when SP
+# leaves the FreeRTOS task stack.  Our WASM fibers deliberately switch to
+# malloc'd stacks, so we must disable this.  Xtensa targets are unaffected
+# (they ignore this option).
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
 
 # WAMR configuration: fast interpreter only, no WASI/pthread (saves RAM)
 CONFIG_WAMR_ENABLE_AOT=n

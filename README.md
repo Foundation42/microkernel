@@ -19,7 +19,7 @@ scheduler with integrated I/O polling.
 - **Core services** -- timers (timerfd), FD watching, name registry, structured logging
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
-- **ESP32 port** -- full feature parity on ESP32-S3, including networking, TLS, and WASM
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa) and ESP32-C6 (RISC-V), including networking, TLS, and WASM
 
 ## Building (Linux)
 
@@ -46,11 +46,17 @@ modules. The WAMR submodule auto-initializes on first build.
 ```bash
 cd platforms/esp32
 cp main/wifi_config.h.example main/wifi_config.h  # edit with WiFi credentials
+idf.py set-target esp32s3  # or esp32c6
 idf.py build flash monitor
 ```
 
-Requires ESP-IDF v5.5+. Runs 18 smoke tests on boot. Tested on ESP32-S3 boards
-(TinyS3, Waveshare).
+Requires ESP-IDF v5.5+. Runs 18 smoke tests on boot. Tested on:
+
+- **ESP32-S3** (Xtensa) -- TinyS3, Waveshare
+- **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit
+
+The build system auto-selects the correct fiber implementation (Xtensa register
+window spill vs RISC-V direct stack switch) based on the target architecture.
 
 ## Quick example
 
