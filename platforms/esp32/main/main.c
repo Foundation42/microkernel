@@ -3,21 +3,25 @@
 #include <inttypes.h>
 #include <esp_log.h>
 #include <esp_vfs_eventfd.h>
-#include <esp_wifi.h>
-#include <esp_netif.h>
-#include <esp_event.h>
-#include <nvs_flash.h>
+#include <soc/soc_caps.h>
 #include <pthread.h>
 #include <esp_pthread.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include "microkernel/runtime.h"
 #include "microkernel/message.h"
+#include "microkernel/wasm_actor.h"
+
+#if SOC_WIFI_SUPPORTED
+#include <esp_wifi.h>
+#include <esp_netif.h>
+#include <esp_event.h>
+#include <nvs_flash.h>
 #include "microkernel/transport_tcp.h"
 #include "microkernel/http.h"
-#include "microkernel/wasm_actor.h"
 #include <lwip/sockets.h>
 #include "wifi_config.h"
+#endif
 
 /* Embedded WASM binary (compiled from tests/wasm_modules/echo.c) */
 extern const uint8_t echo_wasm_start[] asm("_binary_echo_wasm_start");
@@ -152,6 +156,8 @@ static bool test_timer(void) {
     free(ts);
     return ok;
 }
+
+#if SOC_WIFI_SUPPORTED
 
 /* ── WiFi initialization ──────────────────────────────────────────── */
 
@@ -1344,6 +1350,8 @@ static bool test_ws_server(void) {
     return ok;
 }
 
+#endif /* SOC_WIFI_SUPPORTED */
+
 /* ── Test 15: WASM actor spawn ─────────────────────────────────────── */
 
 static bool test_wasm_spawn(void) {
@@ -1591,6 +1599,7 @@ void app_main(void) {
         if (!wasm_pass) pass = false;
     }
 
+#if SOC_WIFI_SUPPORTED
     /* Network tests require WiFi (for lwIP network stack) */
     bool wifi_ok = wifi_init();
     if (wifi_ok) {
@@ -1619,4 +1628,11 @@ void app_main(void) {
     } else {
         ESP_LOGE(TAG, "Some smoke tests FAILED!");
     }
+#else
+    if (pass) {
+        ESP_LOGI(TAG, "All 6 smoke tests passed (no WiFi on this chip)!");
+    } else {
+        ESP_LOGE(TAG, "Some smoke tests FAILED!");
+    }
+#endif
 }

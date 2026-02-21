@@ -1,0 +1,6 @@
+# ESP32-P4 early silicon (rev 1.x) — lower minimum chip revision
+CONFIG_ESP_REV_MIN_FULL=100
+
+# Override console: USB Serial/JTAG may not work on early P4 silicon
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

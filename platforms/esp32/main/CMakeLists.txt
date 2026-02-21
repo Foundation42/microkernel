@@ -2,11 +2,17 @@
 set(WASM_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../tests/wasm_modules/echo.c")
 set(WASM_OUT "${CMAKE_CURRENT_BINARY_DIR}/echo.wasm")
 
+# WiFi components only available on chips with WiFi (S3, C6, etc. — not P4)
+set(WIFI_REQUIRES "")
+if(CONFIG_ESP_WIFI_ENABLED)
+    set(WIFI_REQUIRES esp_wifi esp_netif nvs_flash esp_event)
+endif()
+
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES microkernel microkernel_hal
-    PRIV_REQUIRES vfs esp_wifi esp_netif nvs_flash esp_event
+    PRIV_REQUIRES vfs ${WIFI_REQUIRES}
     EMBED_FILES ${WASM_OUT}
 )
 
