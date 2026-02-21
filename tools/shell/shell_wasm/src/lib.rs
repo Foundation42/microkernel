@@ -14,7 +14,16 @@ fn panic(_info: &PanicInfo) -> ! {
 extern "C" {
     fn mk_send(dest: i64, msg_type: i32, payload: *const u8, size: i32) -> i32;
     fn mk_self() -> i64;
+    #[allow(dead_code)]
     fn mk_recv(type_out: *mut u32, buf: *mut u8, buf_size: i32, size_out: *mut u32) -> i32;
+    fn mk_recv_full(
+        type_out: *mut u32, buf: *mut u8, buf_size: i32,
+        size_out: *mut u32, source_out: *mut i64,
+    ) -> i32;
+    fn mk_recv_timeout(
+        type_out: *mut u32, buf: *mut u8, buf_size: i32,
+        size_out: *mut u32, source_out: *mut i64, timeout_ms: i32,
+    ) -> i32;
     fn mk_print(text: *const u8, len: i32);
     fn mk_stop(id: i64) -> i32;
     fn mk_list_actors(buf: *mut i64, max: i32, count_out: *mut u32) -> i32;
@@ -35,15 +44,14 @@ extern "C" {
 const ACTOR_ID_INVALID: i64 = 0;
 const MSG_SHELL_INPUT: u32 = 100;
 const MSG_INIT: u32 = 101;
+#[allow(dead_code)]
 const MSG_SPAWN_REQUEST: u32 = 102;
 const MSG_SPAWN_RESPONSE: u32 = 103;
+const MSG_SPAWN_REQUEST_NAMED: u32 = 104;
 
 // Buffer sizes
 const INPUT_BUF_SIZE: usize = 1024;
-#[cfg(not(feature = "small"))]
-const FILE_BUF_SIZE: usize = 262144; // 256KB
-#[cfg(feature = "small")]
-const FILE_BUF_SIZE: usize = 32768; // 32KB (embedded targets)
+const FILE_BUF_SIZE: usize = 32768; // 32KB — keeps WASM to 1 page (64KB)
 
 // Static buffers (avoid need for allocator).
 // Safety: single-threaded WASM execution, no concurrent access.
@@ -126,17 +134,70 @@ fn split_first_space(s: &[u8]) -> (&[u8], &[u8]) {
     (s, b"")
 }
 
+/// Resolve a target argument: try name lookup first, fall back to numeric ID.
+fn resolve_target(arg: &[u8]) -> Option<i64> {
+    let id = unsafe { mk_lookup(arg.as_ptr(), arg.len() as i32) };
+    if id != ACTOR_ID_INVALID {
+        return Some(id);
+    }
+    parse_u64(arg).map(|n| n as i64)
+}
+
+/// Extract a base name from a file path or URL.
+/// "/spiffs/echo.wasm" -> "echo", "http://host/modules/foo.wasm?v=2" -> "foo"
+fn extract_name(path: &[u8]) -> &[u8] {
+    // Find last '/'
+    let mut start = 0;
+    for i in 0..path.len() {
+        if path[i] == b'/' {
+            start = i + 1;
+        }
+    }
+    let filename = &path[start..];
+
+    // Truncate at '?' (query string)
+    let mut end = filename.len();
+    for i in 0..filename.len() {
+        if filename[i] == b'?' {
+            end = i;
+            break;
+        }
+    }
+    let filename = &filename[..end];
+
+    // Strip .wasm extension
+    if filename.len() > 5 && &filename[filename.len() - 5..] == b".wasm" {
+        &filename[..filename.len() - 5]
+    } else {
+        filename
+    }
+}
+
+fn print_msg_payload(buf: &[u8], size: u32) {
+    let len = core::cmp::min(size as usize, buf.len());
+    let display_len = core::cmp::min(len, 64);
+    if display_len > 0 {
+        print_str(" \"");
+        print(&buf[..display_len]);
+        if len > display_len {
+            print_str("...");
+        }
+        print_str("\"");
+    }
+}
+
 fn cmd_help() {
     print_str("Commands:\n");
-    print_str("  help                       Show this help\n");
-    print_str("  list                       List active actors\n");
-    print_str("  load <path-or-url>         Load WASM actor from file or URL\n");
-    print_str("  send <id> <type> [payload] Send message to actor\n");
-    print_str("  stop <id>                  Stop an actor\n");
-    print_str("  register <name>            Register self by name\n");
-    print_str("  lookup <name>              Lookup actor by name\n");
-    print_str("  self                       Print own actor ID\n");
-    print_str("  exit                       Shut down\n");
+    print_str("  help                              Show this help\n");
+    print_str("  list                              List active actors\n");
+    print_str("  load <path-or-url>                Load WASM actor from file or URL\n");
+    print_str("  send <name-or-id> <type> [data]   Send message to actor\n");
+    print_str("  call <name-or-id> <type> [data]   Send and wait for reply (5s)\n");
+    print_str("  stop <name-or-id>                 Stop an actor\n");
+    print_str("  register <name>                   Register self by name\n");
+    print_str("  lookup <name>                     Lookup actor by name\n");
+    print_str("  self                              Print own actor ID\n");
+    print_str("  exit                              Shut down\n");
 }
 
 fn cmd_list() {
@@ -181,11 +242,15 @@ fn cmd_load(arg: &[u8]) {
             print_str("error: HTTP GET failed\n");
             return;
         }
+        if status != 200 {
+            print_str("error: HTTP ");
+            print_u64(status as u64);
+            print_str("\n");
+            return;
+        }
         print_str("Downloaded ");
         print_u64(size_out as u64);
-        print_str(" bytes (status ");
-        print_u64(status as u64);
-        print_str(")\n");
+        print_str(" bytes\n");
     } else {
         let rc = unsafe {
             mk_read_file(
@@ -208,16 +273,42 @@ fn cmd_load(arg: &[u8]) {
         return;
     }
 
-    // Send WASM bytes to console actor for spawning (avoids WAMR reentrancy)
+    // Extract name from path/URL for auto-registration
+    let name = extract_name(arg);
+    let name_len = if name.len() > 63 { 63 } else { name.len() };
+    let prefix_len = 1 + name_len;
+
+    if (size_out as usize) + prefix_len > file_buf.len() {
+        print_str("error: file too large for name prefix\n");
+        return;
+    }
+
+    // Shift WASM bytes right to make room for name prefix
+    unsafe {
+        core::ptr::copy(
+            file_buf.as_ptr(),
+            file_buf.as_mut_ptr().add(prefix_len),
+            size_out as usize,
+        );
+        file_buf[0] = name_len as u8;
+        core::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            file_buf.as_mut_ptr().add(1),
+            name_len,
+        );
+    }
+
+    // Send named spawn request to console actor
     let console = unsafe { mk_lookup(b"console\0".as_ptr(), 7) };
     if console == ACTOR_ID_INVALID {
         print_str("error: console actor not found\n");
         return;
     }
 
+    let total = (size_out as usize + prefix_len) as i32;
     let sent = unsafe {
-        mk_send(console, MSG_SPAWN_REQUEST as i32,
-                file_buf.as_ptr(), size_out as i32)
+        mk_send(console, MSG_SPAWN_REQUEST_NAMED as i32,
+                file_buf.as_ptr(), total)
     };
     if sent == 0 {
         print_str("error: failed to send spawn request\n");
@@ -239,27 +330,44 @@ fn handle_spawn_response(payload: *const u8, size: u32) {
     } else {
         print_str("Spawned actor ");
         print_u64(id as u64);
+        if size > 8 {
+            let name_len = (size - 8) as usize;
+            let copy_len = if name_len > 63 { 63 } else { name_len };
+            let mut name_buf = [0u8; 64];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    payload.add(8),
+                    name_buf.as_mut_ptr(),
+                    copy_len,
+                );
+            }
+            print_str(" as '");
+            print(&name_buf[..copy_len]);
+            print_str("'");
+        }
         print_str("\n");
     }
 }
 
 fn cmd_send(arg: &[u8]) {
-    let (id_str, rest) = split_first_space(arg);
-    if id_str.is_empty() {
-        print_str("usage: send <id> <type> [payload]\n");
+    let (target_str, rest) = split_first_space(arg);
+    if target_str.is_empty() {
+        print_str("usage: send <name-or-id> <type> [payload]\n");
         return;
     }
-    let dest = match parse_u64(id_str) {
-        Some(v) => v as i64,
+    let dest = match resolve_target(target_str) {
+        Some(v) => v,
         None => {
-            print_str("error: invalid actor id\n");
+            print_str("error: unknown target '");
+            print(target_str);
+            print_str("'\n");
             return;
         }
     };
 
     let (type_str, payload) = split_first_space(rest);
     if type_str.is_empty() {
-        print_str("usage: send <id> <type> [payload]\n");
+        print_str("usage: send <name-or-id> <type> [payload]\n");
         return;
     }
     let msg_type = match parse_i32(type_str) {
@@ -287,15 +395,92 @@ fn cmd_send(arg: &[u8]) {
     }
 }
 
-fn cmd_stop(arg: &[u8]) {
-    if arg.is_empty() {
-        print_str("usage: stop <id>\n");
+fn cmd_call(arg: &[u8]) {
+    let (target_str, rest) = split_first_space(arg);
+    if target_str.is_empty() {
+        print_str("usage: call <name-or-id> <type> [payload]\n");
         return;
     }
-    let id = match parse_u64(arg) {
-        Some(v) => v as i64,
+    let dest = match resolve_target(target_str) {
+        Some(v) => v,
         None => {
-            print_str("error: invalid actor id\n");
+            print_str("error: unknown target '");
+            print(target_str);
+            print_str("'\n");
+            return;
+        }
+    };
+
+    let (type_str, payload) = split_first_space(rest);
+    if type_str.is_empty() {
+        print_str("usage: call <name-or-id> <type> [payload]\n");
+        return;
+    }
+    let msg_type = match parse_i32(type_str) {
+        Some(v) => v,
+        None => {
+            print_str("error: invalid message type\n");
+            return;
+        }
+    };
+
+    // Send
+    let rc = if payload.is_empty() {
+        unsafe { mk_send(dest, msg_type, core::ptr::null(), 0) }
+    } else {
+        unsafe { mk_send(dest, msg_type, payload.as_ptr(), payload.len() as i32) }
+    };
+    if rc == 0 {
+        print_str("error: send failed\n");
+        return;
+    }
+
+    // Wait for reply with 5s timeout
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let mut recv_type: u32 = 0;
+    let mut recv_size: u32 = 0;
+    let mut recv_source: i64 = 0;
+    let rc = unsafe {
+        mk_recv_timeout(
+            &mut recv_type,
+            input_buf.as_mut_ptr(),
+            input_buf.len() as i32,
+            &mut recv_size,
+            &mut recv_source,
+            5000,
+        )
+    };
+
+    if rc == -2 {
+        print_str("Timeout (5s)\n");
+        return;
+    }
+    if rc < 0 {
+        print_str("error: recv failed\n");
+        return;
+    }
+
+    print_str("[reply] type=");
+    print_u64(recv_type as u64);
+    print_str(" from=");
+    print_u64(recv_source as u64);
+    print_str(" size=");
+    print_u64(recv_size as u64);
+    print_msg_payload(input_buf, recv_size);
+    print_str("\n");
+}
+
+fn cmd_stop(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("usage: stop <name-or-id>\n");
+        return;
+    }
+    let id = match resolve_target(arg) {
+        Some(v) => v,
+        None => {
+            print_str("error: unknown target '");
+            print(arg);
+            print_str("'\n");
             return;
         }
     };
@@ -358,6 +543,8 @@ fn dispatch_command(line: &[u8]) {
         cmd_load(arg);
     } else if cmd == b"send" {
         cmd_send(arg);
+    } else if cmd == b"call" {
+        cmd_call(arg);
     } else if cmd == b"stop" {
         cmd_stop(arg);
     } else if cmd == b"register" {
@@ -386,24 +573,26 @@ pub extern "C" fn handle_message(
 
     if msg_type == MSG_INIT {
         print_str("╔════════════════════════════════════╗\n");
-        print_str("║  microkernel WASM shell v0.1       ║\n");
+        print_str("║  microkernel WASM shell v0.2       ║\n");
         print_str("║  Type 'help' for commands          ║\n");
         print_str("╚════════════════════════════════════╝\n");
 
         let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
 
-        // REPL loop: receive messages via mk_recv
+        // REPL loop: receive messages via mk_recv_full
         loop {
             print_str("mk> ");
 
             let mut recv_type: u32 = 0;
             let mut recv_size: u32 = 0;
+            let mut recv_source: i64 = 0;
             let rc = unsafe {
-                mk_recv(
+                mk_recv_full(
                     &mut recv_type,
                     input_buf.as_mut_ptr(),
                     input_buf.len() as i32,
                     &mut recv_size,
+                    &mut recv_source,
                 )
             };
             if rc < 0 {
@@ -417,6 +606,15 @@ pub extern "C" fn handle_message(
             }
 
             if recv_type != MSG_SHELL_INPUT {
+                // Display unsolicited message
+                print_str("[msg] type=");
+                print_u64(recv_type as u64);
+                print_str(" from=");
+                print_u64(recv_source as u64);
+                print_str(" size=");
+                print_u64(recv_size as u64);
+                print_msg_payload(input_buf, recv_size);
+                print_str("\n");
                 continue;
             }
 

@@ -3,8 +3,9 @@
 Test server for ESP32 HTTP/WebSocket smoke tests.
 
 HTTP on :8080
-  GET  /hello  → {"message":"hello"}
-  POST /echo   → echoes request body
+  GET  /hello       → {"message":"hello"}
+  POST /echo        → echoes request body
+  GET  /files/<path> → serves file from project root (for WASM shell "load" command)
 
 WebSocket on :8081
   Echoes all messages back.
@@ -16,8 +17,12 @@ Usage:
 
 import asyncio
 import json
+import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Project root: two levels up from this script (platforms/esp32/ → project root)
+PROJECT_ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 # ── HTTP server ──────────────────────────────────────────────────────
 
@@ -30,8 +35,30 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/files/"):
+            self._serve_file(self.path[7:])  # strip "/files/"
         else:
             self.send_error(404)
+
+    def _serve_file(self, rel_path):
+        """Serve a file relative to the project root."""
+        safe_path = os.path.realpath(os.path.join(PROJECT_ROOT, rel_path))
+        if not safe_path.startswith(PROJECT_ROOT):
+            self.send_error(403, "Path traversal blocked")
+            return
+        if not os.path.isfile(safe_path):
+            self.send_error(404, f"Not found: {rel_path}")
+            return
+        try:
+            with open(safe_path, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError as e:
+            self.send_error(500, str(e))
 
     def do_POST(self):
         if self.path == "/echo":

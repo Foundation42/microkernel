@@ -2,7 +2,8 @@
 set(WASM_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../tests/wasm_modules/echo.c")
 set(WASM_OUT "${CMAKE_CURRENT_BINARY_DIR}/echo.wasm")
 
-# Path to shell.wasm (compiled from Rust shell_wasm crate, small profile for ESP32)
+# Path to shell.wasm (compiled from Rust shell_wasm crate)
+# Same binary for Linux and ESP32 — 1 page (64KB) via .cargo/config.toml
 set(SHELL_WASM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../tools/shell/shell_wasm")
 set(SHELL_WASM_SRC "${SHELL_WASM_DIR}/src/lib.rs")
 set(SHELL_WASM_TOML "${SHELL_WASM_DIR}/Cargo.toml")
@@ -20,7 +21,6 @@ if(WASM_CC AND NOT EXISTS ${WASM_OUT})
     )
 endif()
 # shell.wasm: copy from cargo target dir if pre-built, else build with cargo.
-# The cargo target may already exist from a prior `cargo build` (Linux or manual).
 find_program(CARGO cargo)
 set(SHELL_WASM_CARGO_OUT "${SHELL_WASM_DIR}/target/wasm32-unknown-unknown/release/mk_shell.wasm")
 if(NOT EXISTS ${SHELL_WASM_OUT} OR "${_shell_sz}" STREQUAL "0")
@@ -38,10 +38,8 @@ if(NOT EXISTS ${SHELL_WASM_OUT} OR "${_shell_sz}" STREQUAL "0")
             if(CARGO)
                 message(STATUS "Building shell.wasm (first configure)...")
                 execute_process(
-                    COMMAND ${CMAKE_COMMAND} -E env
-                            "RUSTFLAGS=-C link-arg=-zstack-size=16384"
-                            ${CARGO} build --target wasm32-unknown-unknown --release
-                            --features small --manifest-path ${SHELL_WASM_TOML}
+                    COMMAND ${CARGO} build --target wasm32-unknown-unknown --release
+                            --manifest-path ${SHELL_WASM_TOML}
                     RESULT_VARIABLE _cargo_rc
                 )
                 if(_cargo_rc EQUAL 0 AND EXISTS ${SHELL_WASM_CARGO_OUT})
@@ -49,14 +47,12 @@ if(NOT EXISTS ${SHELL_WASM_OUT} OR "${_shell_sz}" STREQUAL "0")
                 else()
                     message(WARNING "cargo build failed (rc=${_cargo_rc}). "
                             "Run manually: cd ${SHELL_WASM_DIR} && "
-                            "RUSTFLAGS='-C link-arg=-zstack-size=16384' "
-                            "cargo build --target wasm32-unknown-unknown --release --features small")
+                            "cargo build --target wasm32-unknown-unknown --release")
                 endif()
             else()
                 message(WARNING "cargo not found and no pre-built shell.wasm. "
                         "Run manually: cd ${SHELL_WASM_DIR} && "
-                        "RUSTFLAGS='-C link-arg=-zstack-size=16384' "
-                        "cargo build --target wasm32-unknown-unknown --release --features small")
+                        "cargo build --target wasm32-unknown-unknown --release")
             endif()
         endif()
     endif()
@@ -94,15 +90,13 @@ endif()
 if(CARGO)
     add_custom_command(
         OUTPUT ${SHELL_WASM_OUT}
-        COMMAND ${CMAKE_COMMAND} -E env
-                "RUSTFLAGS=-C link-arg=-zstack-size=16384"
-                ${CARGO} build --target wasm32-unknown-unknown --release
-                --features small --manifest-path ${SHELL_WASM_TOML}
+        COMMAND ${CARGO} build --target wasm32-unknown-unknown --release
+                --manifest-path ${SHELL_WASM_TOML}
         COMMAND ${CMAKE_COMMAND} -E copy
                 "${SHELL_WASM_DIR}/target/wasm32-unknown-unknown/release/mk_shell.wasm"
                 ${SHELL_WASM_OUT}
         DEPENDS ${SHELL_WASM_SRC} ${SHELL_WASM_TOML}
-        COMMENT "Building shell.wasm (Rust, small profile for ESP32)"
+        COMMENT "Building shell.wasm (Rust)"
     )
     add_custom_target(shell_wasm ALL DEPENDS ${SHELL_WASM_OUT})
     add_dependencies(${COMPONENT_LIB} shell_wasm)

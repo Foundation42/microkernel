@@ -13,10 +13,11 @@
 #include <unistd.h>
 #include <sys/poll.h>
 
-#define MSG_SHELL_INPUT      100
-#define MSG_INIT             101
-#define MSG_SPAWN_REQUEST    102
-#define MSG_SPAWN_RESPONSE   103
+#define MSG_SHELL_INPUT          100
+#define MSG_INIT                 101
+#define MSG_SPAWN_REQUEST        102
+#define MSG_SPAWN_RESPONSE       103
+#define MSG_SPAWN_REQUEST_NAMED  104
 
 /* ── Console actor: watches stdin, sends lines, handles spawn requests ── */
 
@@ -46,12 +47,78 @@ static bool console_behavior(runtime_t *rt, actor_t *self,
             new_id = actor_spawn_wasm(rt, msg->payload, msg->payload_size,
                                        32,
                                        WASM_DEFAULT_STACK_SIZE,
-                                       WASM_DEFAULT_HEAP_SIZE,
-                                       FIBER_STACK_SMALL);
+                                       4096,  /* small app heap */
+                                       FIBER_STACK_NONE);
         }
         /* Send response back to requester */
         actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
                    &new_id, sizeof(new_id));
+        return true;
+    }
+
+    if (msg->type == MSG_SPAWN_REQUEST_NAMED) {
+        /* Payload: name_len(1) + name(name_len) + wasm_bytes */
+        actor_id_t new_id = ACTOR_ID_INVALID;
+        if (!msg->payload || msg->payload_size < 2) {
+            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
+                       &new_id, sizeof(new_id));
+            return true;
+        }
+
+        const uint8_t *p = msg->payload;
+        uint8_t name_len = p[0];
+        if (name_len > 63) name_len = 63;
+        if (msg->payload_size < (size_t)(1 + name_len)) {
+            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
+                       &new_id, sizeof(new_id));
+            return true;
+        }
+
+        char name[64];
+        memcpy(name, &p[1], name_len);
+        name[name_len] = '\0';
+
+        const uint8_t *wasm_bytes = &p[1 + name_len];
+        size_t wasm_size = msg->payload_size - 1 - name_len;
+
+        if (wasm_size > 0) {
+            new_id = actor_spawn_wasm(rt, wasm_bytes, wasm_size, 32,
+                                       WASM_DEFAULT_STACK_SIZE,
+                                       4096,  /* small app heap */
+                                       FIBER_STACK_NONE);
+        }
+
+        if (new_id != ACTOR_ID_INVALID) {
+            /* Register with base name, fall back to name_1, name_2, ... */
+            char base[60];
+            size_t bn = strlen(name);
+            if (bn > sizeof(base) - 1) bn = sizeof(base) - 1;
+            memcpy(base, name, bn);
+            base[bn] = '\0';
+
+            char reg_name[64];
+            strncpy(reg_name, base, sizeof(reg_name) - 1);
+            reg_name[sizeof(reg_name) - 1] = '\0';
+
+            if (!actor_register_name(rt, reg_name, new_id)) {
+                for (int i = 1; i <= 99; i++) {
+                    snprintf(reg_name, sizeof(reg_name), "%s_%d", base, i);
+                    if (actor_register_name(rt, reg_name, new_id))
+                        break;
+                }
+            }
+
+            /* Response: actor_id(8) + registered name */
+            size_t rname_len = strlen(reg_name);
+            uint8_t resp[8 + 64];
+            memcpy(resp, &new_id, 8);
+            memcpy(resp + 8, reg_name, rname_len);
+            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
+                       resp, 8 + rname_len);
+        } else {
+            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
+                       &new_id, sizeof(new_id));
+        }
         return true;
     }
 

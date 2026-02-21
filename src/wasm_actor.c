@@ -151,6 +151,82 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
     return 0;
 }
 
+static int32_t mk_recv_full_native(wasm_exec_env_t env, uint32_t *type_out,
+                                     uint8_t *buf, int32_t buf_size,
+                                     uint32_t *size_out, int64_t *source_out) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!s->fiber_stack)
+        return -1;  /* no fiber — can't yield */
+
+    s->recv_msg = NULL;
+    s->fiber_yielded = true;
+    WAMR_TLS_CLEAR();
+#if defined(HAVE_UCONTEXT)
+    swapcontext(&s->fiber_ctx, &s->caller_ctx);
+#elif defined(ESP_PLATFORM)
+    fiber_switch(&s->fiber_ctx, &s->caller_ctx);
+#endif
+    WAMR_TLS_SET(env);
+
+    if (!s->recv_msg)
+        return -1;
+
+    *type_out = (uint32_t)s->recv_msg->type;
+    *source_out = (int64_t)s->recv_msg->source;
+    size_t copy_size = s->recv_msg->payload_size;
+    if (copy_size > (size_t)buf_size)
+        copy_size = (size_t)buf_size;
+    if (copy_size > 0 && s->recv_msg->payload)
+        memcpy(buf, s->recv_msg->payload, copy_size);
+    *size_out = (uint32_t)s->recv_msg->payload_size;
+    return 0;
+}
+
+static int32_t mk_recv_timeout_native(wasm_exec_env_t env, uint32_t *type_out,
+                                        uint8_t *buf, int32_t buf_size,
+                                        uint32_t *size_out, int64_t *source_out,
+                                        int32_t timeout_ms) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!s->fiber_stack)
+        return -1;  /* no fiber — can't yield */
+
+    /* Set a one-shot timer for the timeout */
+    timer_id_t tid = actor_set_timer(s->rt, (uint64_t)timeout_ms, false);
+
+    s->recv_msg = NULL;
+    s->fiber_yielded = true;
+    WAMR_TLS_CLEAR();
+#if defined(HAVE_UCONTEXT)
+    swapcontext(&s->fiber_ctx, &s->caller_ctx);
+#elif defined(ESP_PLATFORM)
+    fiber_switch(&s->fiber_ctx, &s->caller_ctx);
+#endif
+    WAMR_TLS_SET(env);
+
+    if (!s->recv_msg)
+        return -1;
+
+    if (s->recv_msg->type == MSG_TIMER) {
+        *type_out = 0;
+        *size_out = 0;
+        *source_out = 0;
+        return -2;  /* timeout */
+    }
+
+    /* Got message before timeout — cancel timer */
+    actor_cancel_timer(s->rt, tid);
+
+    *type_out = (uint32_t)s->recv_msg->type;
+    *source_out = (int64_t)s->recv_msg->source;
+    size_t copy_size = s->recv_msg->payload_size;
+    if (copy_size > (size_t)buf_size)
+        copy_size = (size_t)buf_size;
+    if (copy_size > 0 && s->recv_msg->payload)
+        memcpy(buf, s->recv_msg->payload, copy_size);
+    *size_out = (uint32_t)s->recv_msg->payload_size;
+    return 0;
+}
+
 /* ── Shell host functions ─────────────────────────────────────────── */
 
 static int mk_print_output_fd = -1;
@@ -296,6 +372,8 @@ static NativeSymbol native_symbols[] = {
     { "mk_log",        mk_log_native,        "(i*~)",       NULL },
     { "mk_sleep_ms",   mk_sleep_ms_native,   "(i)i",        NULL },
     { "mk_recv",       mk_recv_native,       "(**~*)i",     NULL },
+    { "mk_recv_full",  mk_recv_full_native,  "(**~**)i",    NULL },
+    { "mk_recv_timeout",mk_recv_timeout_native,"(**~**i)i",  NULL },
     { "mk_print",      mk_print_native,      "(*~)",        NULL },
     { "mk_spawn_wasm", mk_spawn_wasm_native, "(*~i)I",      NULL },
     { "mk_stop",       mk_stop_native,       "(I)i",        NULL },

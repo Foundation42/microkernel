@@ -171,20 +171,19 @@ after WiFi connects:
 ```
 $ nc 192.168.1.135 23
 ╔════════════════════════════════════╗
-║  microkernel WASM shell v0.1       ║
+║  microkernel WASM shell v0.2       ║
 ║  Type 'help' for commands          ║
 ╚════════════════════════════════════╝
-mk> list
-Active actors (2):
-  4294967297
-  4294967298
-mk> load /spiffs/echo.wasm
-Read 442 bytes from file
+mk> load http://192.168.1.235:8080/files/build/tests/echo.wasm
+Downloaded 1031 bytes
 Loading...
-Spawned actor 4294967299
-mk> send 4294967299 200 hello
+Spawned actor 4294967299 as 'echo'
+mk> call echo 200 hello
+[reply] type=201 from=4294967299 size=5 "hello"
+mk> send echo 200 world
 Sent type=200 to actor 4294967299
-mk> stop 4294967299
+[msg] type=201 from=4294967299 size=5 "world"
+mk> stop echo
 Stopped actor 4294967299
 mk> exit
 Goodbye.
@@ -194,18 +193,23 @@ The shell itself fits in a single 64KB WASM page (`#![no_std]`, static buffers,
 no allocator). A C console actor bridges TCP I/O into the actor message loop.
 On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 
-Commands: `help`, `list`, `self`, `load <path-or-url>`, `send <id> <type> [payload]`,
-`stop <id>`, `register <name>`, `lookup <name>`, `exit`
+Commands: `help`, `list`, `self`, `load <path-or-url>`,
+`send <name-or-id> <type> [payload]`, `call <name-or-id> <type> [payload]`,
+`stop <name-or-id>`, `register <name>`, `lookup <name>`, `exit`
+
+Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
+get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
+seconds for a reply. Unsolicited messages from actors are printed between prompts.
 
 Building the shell WASM module:
 
 ```bash
 cd tools/shell/shell_wasm
-# Full build (256KB file buffer, for Linux)
 cargo build --target wasm32-unknown-unknown --release
-# Small build (32KB file buffer, 1 WASM page, for ESP32)
-RUSTFLAGS="-C link-arg=-zstack-size=16384" cargo build --target wasm32-unknown-unknown --release --features small
 ```
+
+The same binary runs on both Linux and ESP32 -- a single 64KB WASM page via
+`.cargo/config.toml` (16KB stack, 32KB file buffer).
 
 ## Project structure
 
