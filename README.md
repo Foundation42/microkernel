@@ -23,7 +23,7 @@ scheduler with integrated I/O polling.
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
 - **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop actors, send messages, load `.wasm` from files or URLs
-- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa) and ESP32-C6 (RISC-V), including networking, TLS, WASM, and interactive shell
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, and interactive shell
 
 ## Building (Linux)
 
