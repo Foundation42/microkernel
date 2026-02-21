@@ -1,6 +1,7 @@
-# Custom partition table: 1.94 MB app partition (WAMR needs >1 MB on RISC-V)
+# Custom partition table: 1.94 MB app + 256 KB SPIFFS storage
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 CONFIG_VFS_SUPPORT_SELECT=y
 CONFIG_LWIP_USE_ONLY_LWIP_SELECT=n
@@ -8,6 +9,9 @@ CONFIG_LWIP_SO_REUSE=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# Interactive shell blocks in poll() waiting for UART/USB-JTAG input;
+# this starves the IDLE task on single-core chips (C6).
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 
 # RISC-V targets (C6/H2) have a hardware stack guard that faults when SP
 # leaves the FreeRTOS task stack.  Our WASM fibers deliberately switch to

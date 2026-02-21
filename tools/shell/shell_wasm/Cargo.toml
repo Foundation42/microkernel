@@ -6,6 +6,9 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+small = []  # Reduced memory footprint for embedded targets (ESP32)
+
 [profile.release]
 opt-level = "s"
 lto = true

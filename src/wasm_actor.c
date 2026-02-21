@@ -7,12 +7,21 @@
 #include "microkernel/services.h"
 #include "microkernel/http.h"
 #include "wasm_export.h"
+#include <unistd.h>
 
 /* WAMR internal: manage per-thread exec_env TLS.
    When a fiber yields mid-execution, the TLS still points to its exec_env.
-   We must clear it on yield and restore on resume so other WASM actors can run. */
+   We must clear it on yield and restore on resume so other WASM actors can run.
+   Only available when OS_ENABLE_HW_BOUND_CHECK is set (Linux/desktop, not ESP32). */
+#if defined(HAVE_UCONTEXT)
 void wasm_runtime_set_exec_env_tls(wasm_exec_env_t exec_env);
 wasm_exec_env_t wasm_runtime_get_exec_env_tls(void);
+#define WAMR_TLS_CLEAR()    wasm_runtime_set_exec_env_tls(NULL)
+#define WAMR_TLS_SET(env)   wasm_runtime_set_exec_env_tls(env)
+#else
+#define WAMR_TLS_CLEAR()    ((void)0)
+#define WAMR_TLS_SET(env)   ((void)0)
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,14 +109,14 @@ static int32_t mk_sleep_ms_native(wasm_exec_env_t env, int32_t ms) {
 
     actor_set_timer(s->rt, (uint64_t)ms, false);
     s->fiber_yielded = true;
-    wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
+    WAMR_TLS_CLEAR();  /* clear before yield */
 #if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_switch(&s->fiber_ctx, &s->caller_ctx);
 #endif
     /* Resumed by behavior after timer fires */
-    wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
+    WAMR_TLS_SET(env);  /* restore after resume */
     return 0;
 }
 
@@ -120,14 +129,14 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
 
     s->recv_msg = NULL;
     s->fiber_yielded = true;
-    wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
+    WAMR_TLS_CLEAR();  /* clear before yield */
 #if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_switch(&s->fiber_ctx, &s->caller_ctx);
 #endif
     /* Resumed by behavior when a message arrives */
-    wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
+    WAMR_TLS_SET(env);  /* restore after resume */
 
     if (!s->recv_msg)
         return -1;
@@ -144,11 +153,22 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
 
 /* ── Shell host functions ─────────────────────────────────────────── */
 
+static int mk_print_output_fd = -1;
+
+void wasm_actor_set_print_fd(int fd) {
+    mk_print_output_fd = fd;
+}
+
 static void mk_print_native(wasm_exec_env_t env, uint8_t *text, int32_t len) {
     (void)env;
-    if (len > 0 && text)
-        fwrite(text, 1, (size_t)len, stdout);
-    fflush(stdout);
+    if (len > 0 && text) {
+        if (mk_print_output_fd >= 0) {
+            write(mk_print_output_fd, text, (size_t)len);
+        } else {
+            fwrite(text, 1, (size_t)len, stdout);
+            fflush(stdout);
+        }
+    }
 }
 
 static int64_t mk_spawn_wasm_native(wasm_exec_env_t env, uint8_t *buf,
@@ -239,13 +259,13 @@ static int32_t mk_http_get_native(wasm_exec_env_t env, uint8_t *url,
     for (;;) {
         s->recv_msg = NULL;
         s->fiber_yielded = true;
-        wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
+        WAMR_TLS_CLEAR();  /* clear before yield */
 #if defined(HAVE_UCONTEXT)
         swapcontext(&s->fiber_ctx, &s->caller_ctx);
 #elif defined(ESP_PLATFORM)
         fiber_switch(&s->fiber_ctx, &s->caller_ctx);
 #endif
-        wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
+        WAMR_TLS_SET(env);  /* restore after resume */
         if (!s->recv_msg) return -1;
 
         if (s->recv_msg->type == MSG_HTTP_RESPONSE) {
@@ -485,13 +505,13 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     if (state->fiber_yielded) {
         /* Stash message for mk_recv if the fiber was blocked on recv */
         state->recv_msg = msg;
-        wasm_runtime_set_exec_env_tls(state->exec_env);  /* restore TLS */
+        WAMR_TLS_SET(state->exec_env);  /* restore TLS */
 #if defined(HAVE_UCONTEXT)
         swapcontext(&state->caller_ctx, &state->fiber_ctx);
 #elif defined(ESP_PLATFORM)
         fiber_switch(&state->caller_ctx, &state->fiber_ctx);
 #endif
-        wasm_runtime_set_exec_env_tls(NULL);  /* clear after yield/complete */
+        WAMR_TLS_CLEAR();  /* clear after yield/complete */
 
         if (state->fiber_yielded) {
             /* Fiber yielded again (another blocking call) — keep alive */
@@ -574,7 +594,7 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     unsigned int hi = (unsigned int)((addr >> 32) & 0xFFFFFFFF);
     makecontext(&state->fiber_ctx, (void (*)(void))fiber_entry, 2, lo, hi);
 
-    wasm_runtime_set_exec_env_tls(state->exec_env);  /* set TLS for fiber */
+    WAMR_TLS_SET(state->exec_env);  /* set TLS for fiber */
     swapcontext(&state->caller_ctx, &state->fiber_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_init(&state->fiber_ctx, state->fiber_stack,
@@ -582,10 +602,10 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     /* Reset caller context for fresh switch */
     memset(&state->caller_ctx, 0, sizeof(state->caller_ctx));
     state->caller_ctx.started = true;
-    wasm_runtime_set_exec_env_tls(state->exec_env);  /* set TLS for fiber */
+    WAMR_TLS_SET(state->exec_env);  /* set TLS for fiber */
     fiber_switch(&state->caller_ctx, &state->fiber_ctx);
 #endif
-    wasm_runtime_set_exec_env_tls(NULL);  /* clear after yield/complete */
+    WAMR_TLS_CLEAR();  /* clear after yield/complete */
 
     if (state->fiber_yielded) {
         /* Fiber yielded — keep alive, don't free WASM buffer yet */

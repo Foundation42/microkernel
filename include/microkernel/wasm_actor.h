@@ -19,6 +19,9 @@ typedef enum {
 
 #define FIBER_GUARD_SIZE 8192
 
+/* Redirect mk_print output to a file descriptor (-1 = stdout, default) */
+void wasm_actor_set_print_fd(int fd);
+
 /* Initialize/cleanup WAMR (call once per process) */
 bool wasm_actors_init(void);
 void wasm_actors_cleanup(void);

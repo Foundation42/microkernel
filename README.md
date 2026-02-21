@@ -19,7 +19,8 @@ scheduler with integrated I/O polling.
 - **Core services** -- timers (timerfd), FD watching, name registry, structured logging
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
-- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa) and ESP32-C6 (RISC-V), including networking, TLS, and WASM
+- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop actors, send messages, load `.wasm` from files or URLs
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa) and ESP32-C6 (RISC-V), including networking, TLS, WASM, and interactive shell
 
 ## Building (Linux)
 
@@ -161,6 +162,51 @@ runtime_run(rt);
 
 The same `.wasm` binary runs on both Linux and ESP32 without recompilation.
 
+### Interactive WASM shell
+
+The microkernel includes an interactive shell written in Rust, compiled to WASM,
+and running as an actor inside the runtime. On ESP32 it listens on TCP port 23
+after WiFi connects:
+
+```
+$ nc 192.168.1.135 23
+╔════════════════════════════════════╗
+║  microkernel WASM shell v0.1       ║
+║  Type 'help' for commands          ║
+╚════════════════════════════════════╝
+mk> list
+Active actors (2):
+  4294967297
+  4294967298
+mk> load /spiffs/echo.wasm
+Read 442 bytes from file
+Loading...
+Spawned actor 4294967299
+mk> send 4294967299 200 hello
+Sent type=200 to actor 4294967299
+mk> stop 4294967299
+Stopped actor 4294967299
+mk> exit
+Goodbye.
+```
+
+The shell itself fits in a single 64KB WASM page (`#![no_std]`, static buffers,
+no allocator). A C console actor bridges TCP I/O into the actor message loop.
+On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
+
+Commands: `help`, `list`, `self`, `load <path-or-url>`, `send <id> <type> [payload]`,
+`stop <id>`, `register <name>`, `lookup <name>`, `exit`
+
+Building the shell WASM module:
+
+```bash
+cd tools/shell/shell_wasm
+# Full build (256KB file buffer, for Linux)
+cargo build --target wasm32-unknown-unknown --release
+# Small build (32KB file buffer, 1 WASM page, for ESP32)
+RUSTFLAGS="-C link-arg=-zstack-size=16384" cargo build --target wasm32-unknown-unknown --release --features small
+```
+
 ## Project structure
 
 ```
@@ -170,6 +216,7 @@ src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, wire format, utilities)
 tests/                  28 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (echo.c)
+tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
 platforms/esp32/        ESP-IDF project (components: microkernel, microkernel_hal)
 docs/                   Architecture, API reference, examples, development guide

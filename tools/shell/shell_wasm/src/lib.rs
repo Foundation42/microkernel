@@ -40,7 +40,10 @@ const MSG_SPAWN_RESPONSE: u32 = 103;
 
 // Buffer sizes
 const INPUT_BUF_SIZE: usize = 1024;
+#[cfg(not(feature = "small"))]
 const FILE_BUF_SIZE: usize = 262144; // 256KB
+#[cfg(feature = "small")]
+const FILE_BUF_SIZE: usize = 32768; // 32KB (embedded targets)
 
 // Static buffers (avoid need for allocator).
 // Safety: single-threaded WASM execution, no concurrent access.
@@ -382,10 +385,10 @@ pub extern "C" fn handle_message(
     let msg_type = msg_type as u32;
 
     if msg_type == MSG_INIT {
-        print_str("╔══════════════════════════════════════╗\n");
-        print_str("║  microkernel WASM shell v0.1        ║\n");
-        print_str("║  Type 'help' for commands            ║\n");
-        print_str("╚══════════════════════════════════════╝\n");
+        print_str("╔════════════════════════════════════╗\n");
+        print_str("║  microkernel WASM shell v0.1       ║\n");
+        print_str("║  Type 'help' for commands          ║\n");
+        print_str("╚════════════════════════════════════╝\n");
 
         let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
 
