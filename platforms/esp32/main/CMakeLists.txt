@@ -2,9 +2,10 @@
 set(WASM_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../tests/wasm_modules/echo.c")
 set(WASM_OUT "${CMAKE_CURRENT_BINARY_DIR}/echo.wasm")
 
-# WiFi components only available on chips with WiFi (S3, C6, etc. — not P4)
+# Chips without WiFi radio — WiFi components don't exist for these targets
+set(NO_WIFI_TARGETS esp32p4 esp32h2)
 set(WIFI_REQUIRES "")
-if(CONFIG_ESP_WIFI_ENABLED)
+if(NOT IDF_TARGET IN_LIST NO_WIFI_TARGETS)
     set(WIFI_REQUIRES esp_wifi esp_netif nvs_flash esp_event)
 endif()
 

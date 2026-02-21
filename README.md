@@ -50,16 +50,19 @@ idf.py set-target esp32s3  # or esp32c6, esp32p4
 idf.py build flash monitor
 ```
 
-Requires ESP-IDF v5.4+ (v5.5+ for S3/C6). Runs 18 smoke tests on boot (6 on
-chips without WiFi). Tested on:
+Runs 18 smoke tests on boot (6 on chips without WiFi). Tested on:
 
 - **ESP32-S3** (Xtensa) -- TinyS3, Waveshare -- 18 tests
-- **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit -- 18 tests
+- **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit, C6-Zero -- 18 tests
 - **ESP32-P4** (RISC-V dual-core) -- ESP32-P4 -- 6 tests (no WiFi radio)
 
 The build system auto-selects the correct fiber implementation (Xtensa register
 window spill vs RISC-V direct stack switch) and compiles out WiFi-dependent
 tests on chips without a radio.
+
+**ESP-IDF version notes:** Use ESP-IDF v5.5+ for S3 and C6 targets. The P4
+requires v5.4.x for early silicon (rev 1.x) -- v5.5 generates instructions
+unsupported on pre-production P4 chips.
 
 ## Quick example
 
