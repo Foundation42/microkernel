@@ -165,6 +165,72 @@ runtime_run(rt);
 
 The same `.wasm` binary runs on both Linux and ESP32 without recompilation.
 
+### WASM actor in Zig
+
+```zig
+// actor.zig -- compile with:
+//   zig build-lib -target wasm32-freestanding -dynamic -O ReleaseSmall actor.zig
+extern "env" fn mk_send(dest: i64, msg_type: i32, payload: [*]const u8, size: i32) i32;
+extern "env" fn mk_sleep_ms(ms: i32) i32;
+
+const MSG_PING: i32 = 200;
+const MSG_PONG: i32 = 201;
+
+export fn handle_message(
+    msg_type: i32,
+    source: i64,
+    payload: [*]const u8,
+    payload_size: i32,
+) i32 {
+    switch (msg_type) {
+        MSG_PING => {
+            _ = mk_sleep_ms(100);
+            _ = mk_send(source, MSG_PONG, payload, payload_size);
+            return 1;
+        },
+        0 => return 0,
+        else => return 1,
+    }
+}
+```
+
+### WASM actor in Go
+
+Requires [TinyGo](https://tinygo.org/) for bare WASM output (no WASI):
+
+```go
+// actor.go -- compile with:
+//   tinygo build -o actor.wasm -target wasm -scheduler=none -no-debug .
+package main
+
+//go:wasmimport env mk_send
+func mk_send(dest int64, msgType int32, payload *byte, size int32) int32
+
+//go:wasmimport env mk_sleep_ms
+func mk_sleep_ms(ms int32) int32
+
+const (
+	msgPing = 200
+	msgPong = 201
+)
+
+//export handle_message
+func handleMessage(msgType int32, source int64, payload *byte, payloadSize int32) int32 {
+	switch msgType {
+	case msgPing:
+		mk_sleep_ms(100)
+		mk_send(source, msgPong, payload, payloadSize)
+		return 1
+	case 0:
+		return 0
+	default:
+		return 1
+	}
+}
+
+func main() {}
+```
+
 ### Interactive WASM shell
 
 The microkernel includes an interactive shell written in Rust, compiled to WASM,
