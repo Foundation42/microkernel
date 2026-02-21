@@ -19,6 +19,8 @@
 #define MSG_SPAWN_REQUEST        102
 #define MSG_SPAWN_RESPONSE       103
 #define MSG_SPAWN_REQUEST_NAMED  104
+#define MSG_MOUNT_REQUEST        105
+#define MSG_MOUNT_RESPONSE       106
 
 /* ── Console actor: watches stdin, sends lines, handles spawn requests ── */
 
@@ -123,6 +125,42 @@ static bool console_behavior(runtime_t *rt, actor_t *self,
         return true;
     }
 
+    if (msg->type == MSG_MOUNT_REQUEST) {
+        /* Payload: host_len(1) + host(host_len) + port_le(2) */
+        uint8_t resp[64];
+        if (!msg->payload || msg->payload_size < 4) {
+            resp[0] = 1;
+            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
+            return true;
+        }
+        const uint8_t *p = msg->payload;
+        uint8_t host_len = p[0];
+        if (msg->payload_size < (size_t)(1 + host_len + 2)) {
+            resp[0] = 1;
+            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
+            return true;
+        }
+        char host[256];
+        memcpy(host, &p[1], host_len);
+        host[host_len] = '\0';
+        uint16_t port;
+        memcpy(&port, &p[1 + host_len], 2);
+
+        mount_result_t result;
+        int rc = ns_mount_connect(rt, host, port, &result);
+        if (rc == 0) {
+            resp[0] = 0;
+            size_t ilen = strlen(result.identity);
+            memcpy(&resp[1], result.identity, ilen);
+            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE,
+                       resp, 1 + ilen);
+        } else {
+            resp[0] = 1;
+            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
+        }
+        return true;
+    }
+
     if (msg->type == MSG_FD_EVENT) {
         const fd_event_payload_t *ev = msg->payload;
         if (ev->fd != STDIN_FILENO) return true;
@@ -181,7 +219,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    runtime_t *rt = runtime_init(1, 64);
+    runtime_t *rt = runtime_init(mk_node_id(), 64);
     if (!rt) {
         fprintf(stderr, "error: runtime_init failed\n");
         wasm_actors_cleanup();
@@ -189,6 +227,11 @@ int main(int argc, char *argv[]) {
     }
 
     ns_actor_init(rt);
+
+    uint16_t mount_port = MK_MOUNT_PORT;
+    const char *port_env = getenv("MK_MOUNT_PORT");
+    if (port_env && port_env[0]) mount_port = (uint16_t)atoi(port_env);
+    ns_mount_listen(rt, mount_port);
 
     /* Spawn shell WASM actor from file */
     actor_id_t shell = actor_spawn_wasm_file(rt, wasm_path, 32,

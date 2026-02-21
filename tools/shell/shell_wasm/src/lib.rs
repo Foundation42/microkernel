@@ -54,6 +54,8 @@ const MSG_INIT: u32 = 101;
 const MSG_SPAWN_REQUEST: u32 = 102;
 const MSG_SPAWN_RESPONSE: u32 = 103;
 const MSG_SPAWN_REQUEST_NAMED: u32 = 104;
+const MSG_MOUNT_REQUEST: u32 = 105;
+const MSG_MOUNT_RESPONSE: u32 = 106;
 
 // Buffer sizes
 const INPUT_BUF_SIZE: usize = 1024;
@@ -128,6 +130,19 @@ fn parse_u64(s: &[u8]) -> Option<u64> {
 
 fn parse_i32(s: &[u8]) -> Option<i32> {
     parse_u64(s).map(|n| n as i32)
+}
+
+fn parse_u16(s: &[u8]) -> u16 {
+    let mut n: u16 = 0;
+    for &b in s {
+        if b < b'0' || b > b'9' { break; }
+        n = n.wrapping_mul(10).wrapping_add((b - b'0') as u16);
+    }
+    n
+}
+
+fn lookup_name(name: &[u8]) -> i64 {
+    unsafe { mk_lookup(name.as_ptr(), name.len() as i32) }
 }
 
 fn split_first_space(s: &[u8]) -> (&[u8], &[u8]) {
@@ -240,6 +255,7 @@ fn cmd_help() {
     print_str("  stop <name-or-id>                 Stop an actor\n");
     print_str("  register <name>                   Register self by name\n");
     print_str("  lookup <name>                     Lookup actor by name\n");
+    print_str("  mount <host>[:<port>]             Connect to remote node (default port 4200)\n");
     print_str("  whoami                            Show node identity and actor ID\n");
     print_str("  self                              Print own actor ID\n");
     print_str("  exit                              Shut down\n");
@@ -572,6 +588,70 @@ fn cmd_self_id() {
     print_str("\n");
 }
 
+fn cmd_mount(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("Usage: mount <host>[:<port>]\n");
+        return;
+    }
+
+    // Parse host:port (default 4200)
+    let (host, port) = match arg.iter().position(|&b| b == b':') {
+        Some(pos) => (&arg[..pos], parse_u16(&arg[pos+1..])),
+        None => (arg, 4200u16),
+    };
+
+    // Look up console actor
+    let console_id = lookup_name(b"console");
+    if console_id == 0 {
+        print_str("error: console not found\n");
+        return;
+    }
+
+    // Build payload: host_len(1) + host + port_le(2)
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let hlen = host.len().min(250);
+    input_buf[0] = hlen as u8;
+    input_buf[1..1+hlen].copy_from_slice(&host[..hlen]);
+    let port_bytes = port.to_le_bytes();
+    input_buf[1+hlen] = port_bytes[0];
+    input_buf[2+hlen] = port_bytes[1];
+    let total = 1 + hlen + 2;
+
+    unsafe { mk_send(console_id, MSG_MOUNT_REQUEST as i32,
+                      input_buf.as_ptr(), total as i32) };
+
+    print_str("Connecting...\n");
+
+    // Wait for response (5s timeout)
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let mut src: i64 = 0;
+    let mut out_size: u32 = 0;
+    let mut msg_type: u32 = MSG_MOUNT_RESPONSE;
+    let rc = unsafe {
+        mk_recv_timeout(&mut msg_type, file_buf.as_mut_ptr(),
+                        file_buf.len() as i32, &mut out_size,
+                        &mut src, 5000)
+    };
+
+    if rc == -2 {
+        print_str("Timeout\n");
+        return;
+    }
+    if rc < 0 || out_size < 1 {
+        print_str("error: mount failed\n");
+        return;
+    }
+
+    if file_buf[0] == 0 && out_size > 1 {
+        let ident_len = (out_size as usize - 1).min(31);
+        print_str("Mounted /node/");
+        print(&file_buf[1..1+ident_len]);
+        print_str("\n");
+    } else {
+        print_str("error: connection failed\n");
+    }
+}
+
 fn dispatch_command(line: &[u8]) {
     let trimmed = trim(line);
     if trimmed.is_empty() {
@@ -606,6 +686,8 @@ fn dispatch_command(line: &[u8]) {
         cmd_lookup(arg);
     } else if cmd == b"self" {
         cmd_self_id();
+    } else if cmd == b"mount" {
+        cmd_mount(arg);
     } else if cmd == b"exit" || cmd == b"quit" {
         // Handled by caller — won't reach here
     } else {
@@ -655,6 +737,12 @@ pub extern "C" fn handle_message(
 
             if recv_type == MSG_SPAWN_RESPONSE {
                 handle_spawn_response(input_buf.as_ptr(), recv_size);
+                continue;
+            }
+
+            if recv_type == MSG_MOUNT_RESPONSE {
+                // Mount response handled inline (cmd_mount uses mk_recv_timeout)
+                // If we get here, it's a stale response — just display it
                 continue;
             }
 

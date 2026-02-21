@@ -91,4 +91,39 @@ const char *mk_node_identity(void);
    Returns bytes written. */
 size_t ns_list_paths(runtime_t *rt, const char *prefix, char *buf, size_t buf_size);
 
+/* Stable node ID derived from identity.
+   Linux: MK_NODE_ID env var or hash of identity -> [1,15].
+   ESP32: hash of identity -> [1,15]. */
+node_id_t mk_node_id(void);
+
+/* Remove a specific path by name (for remote unregister). */
+void ns_remove_path(runtime_t *rt, const char *path);
+
+/* Sync all local names + paths to a single transport. */
+struct transport;
+void ns_sync_to_transport(runtime_t *rt, struct transport *tp);
+
+/* Start a mount listener on the given port. Returns listener actor ID. */
+actor_id_t ns_mount_listen(runtime_t *rt, uint16_t port);
+
+/* Connect to a remote mount listener. Blocking (3s timeout).
+   On success, returns 0 and fills result. On failure, returns -1. */
+typedef struct {
+    char      identity[32];
+    node_id_t node_id;
+} mount_result_t;
+
+int ns_mount_connect(runtime_t *rt, const char *host, uint16_t port,
+                     mount_result_t *result);
+
+#define MK_MOUNT_PORT 4200
+
+/* Mount hello (exchanged over raw TCP before transport creation) */
+#define MOUNT_HELLO_MAGIC 0x4D4B3031  /* "MK01" */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;        /* MOUNT_HELLO_MAGIC, network byte order */
+    uint32_t node_id;      /* network byte order */
+    char     identity[32]; /* null-terminated */
+} mount_hello_t;
+
 #endif /* MICROKERNEL_NAMESPACE_H */

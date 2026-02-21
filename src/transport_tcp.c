@@ -223,6 +223,32 @@ transport_t *transport_tcp_listen(const char *host, uint16_t port,
     return tp;
 }
 
+transport_t *transport_tcp_from_fd(int fd, node_id_t peer_node) {
+    set_nonblocking(fd);
+
+    transport_t *tp = calloc(1, sizeof(*tp));
+    tcp_impl_t *impl = calloc(1, sizeof(*impl));
+    if (!tp || !impl) {
+        free(tp); free(impl);
+        return NULL;
+    }
+
+    impl->listen_fd = -1;
+    impl->conn_fd = fd;
+    impl->is_server = false;
+    impl->read_target = WIRE_HEADER_SIZE;
+
+    tp->peer_node = peer_node;
+    tp->fd = fd;
+    tp->send = tcp_send;
+    tp->recv = tcp_recv;
+    tp->is_connected = tcp_is_connected;
+    tp->destroy = tcp_destroy;
+    tp->impl = impl;
+
+    return tp;
+}
+
 transport_t *transport_tcp_connect(const char *host, uint16_t port,
                                    node_id_t peer_node) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);

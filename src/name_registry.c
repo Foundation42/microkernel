@@ -44,7 +44,16 @@ bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id) {
 bool actor_register_name(runtime_t *rt, const char *name, actor_id_t id) {
     /* Route /-prefixed paths to namespace path table */
     if (name && name[0] == '/') {
-        return ns_register_path(rt, name, id) == NS_OK;
+        int rc = ns_register_path(rt, name, id);
+        if (rc != NS_OK) return false;
+        /* Broadcast path registration to peers */
+        path_register_payload_t payload;
+        memset(&payload, 0, sizeof(payload));
+        strncpy(payload.path, name, 128 - 1);
+        payload.actor_id = id;
+        runtime_broadcast_registry(rt, MSG_PATH_REGISTER,
+                                    &payload, sizeof(payload));
+        return true;
     }
 
     if (!name_registry_insert(rt, name, id)) return false;

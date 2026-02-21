@@ -13,4 +13,7 @@ transport_t *transport_tcp_listen(const char *host, uint16_t port,
 transport_t *transport_tcp_connect(const char *host, uint16_t port,
                                    node_id_t peer_node);
 
+/* Wrap an already-connected TCP fd as a transport. */
+transport_t *transport_tcp_from_fd(int fd, node_id_t peer_node);
+
 #endif /* MICROKERNEL_TRANSPORT_TCP_H */

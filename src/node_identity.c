@@ -49,3 +49,29 @@ const char *mk_node_identity(void) {
     return s_node_name;
 }
 #endif
+
+/* ── Stable node ID ────────────────────────────────────────────────── */
+
+static node_id_t identity_hash_id(void) {
+    const char *name = mk_node_identity();
+    uint32_t h = 2166136261u;
+    for (const char *p = name; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= 16777619u;
+    }
+    return (node_id_t)((h % 15) + 1);
+}
+
+#ifdef ESP_PLATFORM
+node_id_t mk_node_id(void) { return identity_hash_id(); }
+#else
+#include <stdlib.h>
+node_id_t mk_node_id(void) {
+    const char *env = getenv("MK_NODE_ID");
+    if (env && env[0]) {
+        int id = atoi(env);
+        if (id >= 1 && id < 16) return (node_id_t)id;
+    }
+    return identity_hash_id();
+}
+#endif

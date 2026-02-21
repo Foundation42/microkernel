@@ -32,6 +32,10 @@
 #define MSG_NAME_REGISTER     ((msg_type_t)0xFF000012)
 #define MSG_NAME_UNREGISTER   ((msg_type_t)0xFF000013)
 
+/* Phase 15.5: Cross-node path registry */
+#define MSG_PATH_REGISTER     ((msg_type_t)0xFF00001B)
+#define MSG_PATH_UNREGISTER   ((msg_type_t)0xFF00001C)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {
@@ -79,6 +83,16 @@ typedef struct {
 typedef struct {
     char name[64];
 } name_unregister_payload_t;
+
+/* Path registry payloads (NS_PATH_MAX-sized path field) */
+typedef struct {
+    char       path[128];   /* NS_PATH_MAX */
+    actor_id_t actor_id;
+} path_register_payload_t;
+
+typedef struct {
+    char path[128];         /* NS_PATH_MAX */
+} path_unregister_payload_t;
 
 /* ── Name registry API ─────────────────────────────────────────────── */
 

@@ -5,6 +5,7 @@
 #include "microkernel/scheduler.h"
 #include "microkernel/transport.h"
 #include "microkernel/supervision.h"
+#include "microkernel/namespace.h"
 #include "runtime_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -857,6 +858,20 @@ static bool handle_registry_msg(runtime_t *rt, message_t *msg) {
     if (msg->type == MSG_NAME_UNREGISTER) {
         const name_unregister_payload_t *p = msg->payload;
         name_registry_remove_by_name(rt, p->name);
+        return true;
+    }
+    if (msg->type == MSG_PATH_REGISTER) {
+        if (msg->payload_size >= sizeof(path_register_payload_t)) {
+            const path_register_payload_t *p = msg->payload;
+            ns_register_path(rt, p->path, p->actor_id);
+        }
+        return true;
+    }
+    if (msg->type == MSG_PATH_UNREGISTER) {
+        if (msg->payload_size >= sizeof(path_unregister_payload_t)) {
+            const path_unregister_payload_t *p = msg->payload;
+            ns_remove_path(rt, p->path);
+        }
         return true;
     }
     return false;

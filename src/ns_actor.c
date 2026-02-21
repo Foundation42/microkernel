@@ -4,10 +4,20 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/supervision.h"
+#include "microkernel/transport.h"
+#include "microkernel/transport_tcp.h"
 #include "runtime_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/poll.h>
 
 /* ── Path table (hierarchical /paths) ──────────────────────────────── */
 
@@ -308,7 +318,28 @@ actor_id_t ns_lookup_path(runtime_t *rt, const char *path) {
 void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
     ns_state_t *s = runtime_get_ns_state(rt);
     if (!s) return;
-    ns_path_remove_actor(s, id);
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (s->paths[i].occupied && s->paths[i].actor_id == id) {
+            /* Broadcast deregistration to peers */
+            path_unregister_payload_t p;
+            memset(&p, 0, sizeof(p));
+            strncpy(p.path, s->paths[i].path, NS_PATH_MAX - 1);
+            runtime_broadcast_registry(rt, MSG_PATH_UNREGISTER,
+                                        &p, sizeof(p));
+            memset(&s->paths[i], 0, sizeof(path_entry_t));
+        }
+    }
+}
+
+void ns_remove_path(runtime_t *rt, const char *path) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s || !path) return;
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (s->paths[i].occupied && strcmp(s->paths[i].path, path) == 0) {
+            memset(&s->paths[i], 0, sizeof(path_entry_t));
+            return;
+        }
+    }
 }
 
 size_t ns_list_paths(runtime_t *rt, const char *prefix, char *buf, size_t buf_size) {
@@ -327,6 +358,224 @@ size_t ns_list_paths(runtime_t *rt, const char *prefix, char *buf, size_t buf_si
         if (n > 0 && (size_t)n < buf_size - off) off += (size_t)n;
     }
     return off;
+}
+
+/* ── Cross-node sync + mount ────────────────────────────────────────── */
+
+void ns_sync_to_transport(runtime_t *rt, transport_t *tp) {
+    /* Sync flat names */
+    name_entry_t *reg = runtime_get_name_registry(rt);
+    size_t cap = runtime_get_name_registry_size();
+    for (size_t i = 0; i < cap; i++) {
+        if (!reg[i].occupied) continue;
+        name_register_payload_t p;
+        memset(&p, 0, sizeof(p));
+        strncpy(p.name, reg[i].name, 63);
+        p.actor_id = reg[i].actor_id;
+        message_t *msg = message_create(ACTOR_ID_INVALID, ACTOR_ID_INVALID,
+                                         MSG_NAME_REGISTER, &p, sizeof(p));
+        if (msg) { tp->send(tp, msg); message_destroy(msg); }
+    }
+
+    /* Sync paths */
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s) return;
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (!s->paths[i].occupied) continue;
+        path_register_payload_t p;
+        memset(&p, 0, sizeof(p));
+        strncpy(p.path, s->paths[i].path, NS_PATH_MAX - 1);
+        p.actor_id = s->paths[i].actor_id;
+        message_t *msg = message_create(ACTOR_ID_INVALID, ACTOR_ID_INVALID,
+                                         MSG_PATH_REGISTER, &p, sizeof(p));
+        if (msg) { tp->send(tp, msg); message_destroy(msg); }
+    }
+}
+
+static ssize_t recv_full(int fd, void *buf, size_t len) {
+    size_t pos = 0;
+    while (pos < len) {
+        ssize_t n = recv(fd, (uint8_t *)buf + pos, len - pos, 0);
+        if (n <= 0) return -1;
+        pos += (size_t)n;
+    }
+    return (ssize_t)len;
+}
+
+static void set_nonblocking_ns(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int ns_mount_connect(runtime_t *rt, const char *host, uint16_t port,
+                     mount_result_t *result) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        close(fd); return -1;
+    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd); return -1;
+    }
+
+    /* Send our hello */
+    mount_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.magic = htonl(MOUNT_HELLO_MAGIC);
+    hello.node_id = htonl(runtime_get_node_id(rt));
+    strncpy(hello.identity, mk_node_identity(), 31);
+    if (send(fd, &hello, sizeof(hello), 0) != sizeof(hello)) {
+        close(fd); return -1;
+    }
+
+    /* Read peer's hello */
+    mount_hello_t peer;
+    if (recv_full(fd, &peer, sizeof(peer)) < 0) {
+        close(fd); return -1;
+    }
+    if (ntohl(peer.magic) != MOUNT_HELLO_MAGIC) {
+        close(fd); return -1;
+    }
+
+    node_id_t peer_node = ntohl(peer.node_id);
+    if (peer_node == 0 || peer_node == runtime_get_node_id(rt)) {
+        close(fd); return -1;  /* collision or invalid */
+    }
+
+    /* Wrap as transport */
+    set_nonblocking_ns(fd);
+    transport_t *tp = transport_tcp_from_fd(fd, peer_node);
+    if (!tp) { close(fd); return -1; }
+    if (!runtime_add_transport(rt, tp)) {
+        tp->destroy(tp); return -1;
+    }
+
+    /* Sync registrations */
+    ns_sync_to_transport(rt, tp);
+
+    if (result) {
+        memset(result, 0, sizeof(*result));
+        strncpy(result->identity, peer.identity, 31);
+        result->node_id = peer_node;
+    }
+    return 0;
+}
+
+/* ── Mount listener actor ──────────────────────────────────────────── */
+
+typedef struct {
+    int      listen_fd;
+    uint16_t port;
+    bool     watching;
+} mount_listener_state_t;
+
+static void mount_listener_destroy(void *state) {
+    mount_listener_state_t *ml = state;
+    if (ml->listen_fd >= 0) close(ml->listen_fd);
+    free(ml);
+}
+
+static bool mount_listener_behavior(runtime_t *rt, actor_t *self,
+                                     message_t *msg, void *state) {
+    (void)self;
+    mount_listener_state_t *ml = state;
+
+    if (!ml->watching) {
+        actor_watch_fd(rt, ml->listen_fd, POLLIN);
+        ml->watching = true;
+        return true;
+    }
+
+    if (msg->type != MSG_FD_EVENT) return true;
+    const fd_event_payload_t *ev = msg->payload;
+    if (ev->fd != ml->listen_fd) return true;
+
+    int client_fd = accept(ml->listen_fd, NULL, NULL);
+    if (client_fd < 0) return true;
+
+    struct timeval tv = {3, 0};
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    /* Read client hello */
+    mount_hello_t peer;
+    if (recv_full(client_fd, &peer, sizeof(peer)) < 0) {
+        close(client_fd); return true;
+    }
+    if (ntohl(peer.magic) != MOUNT_HELLO_MAGIC) {
+        close(client_fd); return true;
+    }
+
+    node_id_t peer_node = ntohl(peer.node_id);
+    if (peer_node == 0 || peer_node == runtime_get_node_id(rt)) {
+        close(client_fd); return true;
+    }
+
+    /* Send our hello */
+    mount_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.magic = htonl(MOUNT_HELLO_MAGIC);
+    hello.node_id = htonl(runtime_get_node_id(rt));
+    strncpy(hello.identity, mk_node_identity(), 31);
+    if (send(client_fd, &hello, sizeof(hello), 0) != sizeof(hello)) {
+        close(client_fd); return true;
+    }
+
+    /* Create transport */
+    set_nonblocking_ns(client_fd);
+    transport_t *tp = transport_tcp_from_fd(client_fd, peer_node);
+    if (!tp) { close(client_fd); return true; }
+    if (!runtime_add_transport(rt, tp)) {
+        tp->destroy(tp); return true;
+    }
+
+    ns_sync_to_transport(rt, tp);
+    return true;
+}
+
+actor_id_t ns_mount_listen(runtime_t *rt, uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return ACTOR_ID_INVALID;
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fd); return ACTOR_ID_INVALID;
+    }
+    if (listen(fd, 4) < 0) {
+        close(fd); return ACTOR_ID_INVALID;
+    }
+    set_nonblocking_ns(fd);
+
+    mount_listener_state_t *ml = calloc(1, sizeof(*ml));
+    if (!ml) { close(fd); return ACTOR_ID_INVALID; }
+    ml->listen_fd = fd;
+    ml->port = port;
+
+    actor_id_t id = actor_spawn(rt, mount_listener_behavior, ml,
+                                 mount_listener_destroy, 16);
+    if (id == ACTOR_ID_INVALID) {
+        close(fd); free(ml);
+        return ACTOR_ID_INVALID;
+    }
+
+    /* Kick the actor so it starts watching the fd */
+    runtime_deliver_msg(rt, id, 1, NULL, 0);
+    return id;
 }
 
 /* ── Waiter actor for synchronous ns_call ──────────────────────────── */
