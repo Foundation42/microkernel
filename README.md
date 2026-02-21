@@ -46,17 +46,20 @@ modules. The WAMR submodule auto-initializes on first build.
 ```bash
 cd platforms/esp32
 cp main/wifi_config.h.example main/wifi_config.h  # edit with WiFi credentials
-idf.py set-target esp32s3  # or esp32c6
+idf.py set-target esp32s3  # or esp32c6, esp32p4
 idf.py build flash monitor
 ```
 
-Requires ESP-IDF v5.5+. Runs 18 smoke tests on boot. Tested on:
+Requires ESP-IDF v5.4+ (v5.5+ for S3/C6). Runs 18 smoke tests on boot (6 on
+chips without WiFi). Tested on:
 
-- **ESP32-S3** (Xtensa) -- TinyS3, Waveshare
-- **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit
+- **ESP32-S3** (Xtensa) -- TinyS3, Waveshare -- 18 tests
+- **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit -- 18 tests
+- **ESP32-P4** (RISC-V dual-core) -- ESP32-P4 -- 6 tests (no WiFi radio)
 
 The build system auto-selects the correct fiber implementation (Xtensa register
-window spill vs RISC-V direct stack switch) based on the target architecture.
+window spill vs RISC-V direct stack switch) and compiles out WiFi-dependent
+tests on chips without a radio.
 
 ## Quick example
 
