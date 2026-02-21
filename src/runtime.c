@@ -81,6 +81,8 @@ struct runtime {
     uint32_t         next_http_conn_id;   /* monotonic, starts at 1 */
     /* Phase 5: HTTP listeners */
     http_listener_t  http_listeners[MAX_HTTP_LISTENERS];
+    /* Phase 15: namespace actor state (direct access) */
+    void            *ns_state;
 };
 
 /* ── Initialization / teardown ──────────────────────────────────────── */
@@ -810,6 +812,16 @@ uint32_t runtime_alloc_http_conn_id(runtime_t *rt) {
 
 http_listener_t *runtime_get_http_listeners(runtime_t *rt) {
     return rt->http_listeners;
+}
+
+/* ── Namespace state accessors (used by ns_actor.c, name_registry.c) ── */
+
+void *runtime_get_ns_state(runtime_t *rt) {
+    return rt->ns_state;
+}
+
+void runtime_set_ns_state(runtime_t *rt, void *state) {
+    rt->ns_state = state;
 }
 
 /* ── Cross-node registry ───────────────────────────────────────────── */

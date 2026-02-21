@@ -69,6 +69,12 @@ typedef struct {
 /* Spawn the namespace actor. Returns its ID. Registers itself as "ns". */
 actor_id_t ns_actor_init(runtime_t *rt);
 
+/* Direct-access path operations (bypass message queue, safe in single-threaded runtime).
+   Used by name_registry.c for transparent /-prefixed path support. */
+int        ns_register_path(runtime_t *rt, const char *path, actor_id_t id);
+actor_id_t ns_lookup_path(runtime_t *rt, const char *path);
+void       ns_deregister_actor_paths(runtime_t *rt, actor_id_t id);
+
 /* Synchronous call to namespace actor (waiter actor pattern).
    Caller provides MSG_NS_* type + payload, gets ns_reply_t back.
    Only safe from outside the scheduler (init code, tests). */

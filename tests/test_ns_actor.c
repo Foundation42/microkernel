@@ -13,6 +13,17 @@ static bool noop_behavior(runtime_t *rt, actor_t *self,
     return true;
 }
 
+/* Echo behavior: counts messages of a given type */
+typedef struct { int count; } echo_state_t;
+
+static bool echo_behavior(runtime_t *rt, actor_t *self,
+                           message_t *msg, void *state) {
+    (void)rt; (void)self;
+    echo_state_t *es = state;
+    if (msg->type == 42) es->count++;
+    return true;
+}
+
 /* ── Test 1: ns_actor_init registers "ns" and is discoverable ──────── */
 
 static int test_ns_init(void) {
@@ -271,6 +282,119 @@ static int test_duplicate_mount(void) {
     return 0;
 }
 
+/* ── Test 9: transparent register + lookup via actor_register_name ──── */
+
+static int test_transparent_register_path(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    ns_actor_init(rt);
+
+    actor_id_t worker = actor_spawn(rt, noop_behavior, NULL, NULL, 16);
+
+    /* Register via public API — transparently routes to path table */
+    bool ok = actor_register_name(rt, "/svc/worker", worker);
+    ASSERT(ok);
+
+    /* Lookup via public API */
+    actor_id_t found = actor_lookup(rt, "/svc/worker");
+    ASSERT_EQ(found, worker);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── Test 10: transparent send_named via path ──────────────────────── */
+
+static int test_transparent_send_named(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    ns_actor_init(rt);
+
+    echo_state_t es = {0};
+    actor_id_t echo = actor_spawn(rt, echo_behavior, &es, NULL, 16);
+
+    actor_register_name(rt, "/svc/echo", echo);
+
+    /* Send via path name */
+    bool ok = actor_send_named(rt, "/svc/echo", 42, "hi", 2);
+    ASSERT(ok);
+
+    /* Step to deliver */
+    runtime_step(rt);
+    ASSERT_EQ(es.count, 1);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── Test 11: path ops before ns_actor_init gracefully fail ────────── */
+
+static int test_path_before_ns_init(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    /* No ns_actor_init() */
+
+    actor_id_t worker = actor_spawn(rt, noop_behavior, NULL, NULL, 16);
+
+    /* Register should fail (ns_state is NULL) */
+    bool ok = actor_register_name(rt, "/foo", worker);
+    ASSERT(!ok);
+
+    /* Lookup should return INVALID */
+    actor_id_t found = actor_lookup(rt, "/foo");
+    ASSERT_EQ(found, ACTOR_ID_INVALID);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── Test 12: transparent mount lookup via actor_lookup ─────────────── */
+
+static int test_transparent_mount_lookup(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    ns_actor_init(rt);
+
+    actor_id_t proxy = actor_spawn(rt, noop_behavior, NULL, NULL, 16);
+
+    /* Mount /mnt/proxy via ns_call (mount is still message-based) */
+    ns_mount_t mnt;
+    memset(&mnt, 0, sizeof(mnt));
+    strncpy(mnt.mount_point, "/mnt/proxy", NS_PATH_MAX - 1);
+    mnt.target = proxy;
+
+    ns_reply_t reply;
+    int rc = ns_call(rt, MSG_NS_MOUNT, &mnt, sizeof(mnt), &reply);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(reply.status, NS_OK);
+
+    /* Lookup through mount via public API */
+    actor_id_t found = actor_lookup(rt, "/mnt/proxy/sub");
+    ASSERT_EQ(found, proxy);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── Test 13: path cleanup on actor death ──────────────────────────── */
+
+static int test_path_cleanup_on_death(void) {
+    runtime_t *rt = runtime_init(0, 64);
+    ns_actor_init(rt);
+
+    actor_id_t mortal = actor_spawn(rt, noop_behavior, NULL, NULL, 16);
+    actor_register_name(rt, "/svc/mortal", mortal);
+
+    /* Verify registered */
+    ASSERT_EQ(actor_lookup(rt, "/svc/mortal"), mortal);
+
+    /* Kill actor and step to clean up */
+    actor_stop(rt, mortal);
+    runtime_step(rt);
+
+    /* Path should be gone */
+    ASSERT_EQ(actor_lookup(rt, "/svc/mortal"), ACTOR_ID_INVALID);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
 /* ── main ──────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -283,5 +407,10 @@ int main(void) {
     RUN_TEST(test_mount_umount);
     RUN_TEST(test_duplicate_path);
     RUN_TEST(test_duplicate_mount);
+    RUN_TEST(test_transparent_register_path);
+    RUN_TEST(test_transparent_send_named);
+    RUN_TEST(test_path_before_ns_init);
+    RUN_TEST(test_transparent_mount_lookup);
+    RUN_TEST(test_path_cleanup_on_death);
     TEST_REPORT();
 }

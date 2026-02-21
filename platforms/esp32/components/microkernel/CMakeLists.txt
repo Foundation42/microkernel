@@ -20,6 +20,7 @@ idf_component_register(
         "${MK_SRC_DIR}/ws_frame.c"
         "${MK_SRC_DIR}/supervision.c"
         "${MK_SRC_DIR}/wasm_actor.c"
+        "${MK_SRC_DIR}/ns_actor.c"
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
     PRIV_INCLUDE_DIRS

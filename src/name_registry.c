@@ -1,5 +1,6 @@
 #include "runtime_internal.h"
 #include "microkernel/message.h"
+#include "microkernel/namespace.h"
 #include <string.h>
 
 /* Forward declarations for runtime-level broadcast */
@@ -41,6 +42,11 @@ bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id) {
 
 /* Public: register name and broadcast to all connected peers */
 bool actor_register_name(runtime_t *rt, const char *name, actor_id_t id) {
+    /* Route /-prefixed paths to namespace path table */
+    if (name && name[0] == '/') {
+        return ns_register_path(rt, name, id) == NS_OK;
+    }
+
     if (!name_registry_insert(rt, name, id)) return false;
 
     /* Broadcast to all peers */
@@ -55,6 +61,10 @@ bool actor_register_name(runtime_t *rt, const char *name, actor_id_t id) {
 
 actor_id_t actor_lookup(runtime_t *rt, const char *name) {
     if (!name || !name[0]) return ACTOR_ID_INVALID;
+    /* Route /-prefixed paths to namespace path table */
+    if (name[0] == '/') {
+        return ns_lookup_path(rt, name);
+    }
     name_entry_t *reg = runtime_get_name_registry(rt);
     size_t cap = runtime_get_name_registry_size();
     uint32_t h = fnv1a(name) % cap;
@@ -97,4 +107,6 @@ void name_registry_deregister_actor(runtime_t *rt, actor_id_t id) {
             memset(&reg[i], 0, sizeof(name_entry_t));
         }
     }
+    /* Also clean up any /-prefixed paths in the namespace actor */
+    ns_deregister_actor_paths(rt, id);
 }

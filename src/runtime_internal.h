@@ -157,6 +157,10 @@ void runtime_set_actor_parent(runtime_t *rt, actor_id_t child_id,
                                actor_id_t parent_id);
 void *runtime_get_actor_state(runtime_t *rt, actor_id_t id);
 
+/* Phase 15: Namespace state */
+void *runtime_get_ns_state(runtime_t *rt);
+void  runtime_set_ns_state(runtime_t *rt, void *state);
+
 /* Phase 11: Cross-node registry */
 void runtime_broadcast_registry(runtime_t *rt, msg_type_t type,
                                  const void *payload, size_t payload_size);

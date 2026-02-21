@@ -277,8 +277,31 @@ actor_id_t ns_actor_init(runtime_t *rt) {
         return ACTOR_ID_INVALID;
     }
 
+    runtime_set_ns_state(rt, s);
     actor_register_name(rt, "ns", id);
     return id;
+}
+
+/* ── Direct-access path operations (bypass message queue) ──────────── */
+
+int ns_register_path(runtime_t *rt, const char *path, actor_id_t id) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s) return NS_EINVAL;
+    return ns_path_register(s, path, id);
+}
+
+actor_id_t ns_lookup_path(runtime_t *rt, const char *path) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s) return ACTOR_ID_INVALID;
+    mount_entry_t *mount = ns_mount_match(s, path);
+    if (mount) return mount->target;
+    return ns_path_lookup(s, path);
+}
+
+void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s) return;
+    ns_path_remove_actor(s, id);
 }
 
 /* ── Waiter actor for synchronous ns_call ──────────────────────────── */
