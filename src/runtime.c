@@ -306,6 +306,19 @@ static void http_conn_free(http_conn_t *conn) {
     memset(conn, 0, sizeof(*conn));
 }
 
+/* ── Introspection ─────────────────────────────────────────────────── */
+
+size_t runtime_list_actors(runtime_t *rt, actor_id_t *buf, size_t max_count) {
+    size_t n = 0;
+    for (size_t i = 1; i < rt->max_actors && n < max_count; i++) {
+        actor_t *a = rt->actors[i];
+        if (a && a->status != ACTOR_STOPPED) {
+            buf[n++] = a->id;
+        }
+    }
+    return n;
+}
+
 /* ── Execution ──────────────────────────────────────────────────────── */
 
 /* Forward declarations for service cleanup */

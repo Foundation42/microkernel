@@ -26,6 +26,9 @@ void      *actor_state(runtime_t *rt);
 /* Transport */
 bool runtime_add_transport(runtime_t *rt, transport_t *transport);
 
+/* Introspection */
+size_t runtime_list_actors(runtime_t *rt, actor_id_t *buf, size_t max_count);
+
 /* Execution */
 void runtime_run(runtime_t *rt);   /* Blocking event loop */
 void runtime_step(runtime_t *rt);  /* Single scheduling iteration */

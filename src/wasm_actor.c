@@ -5,7 +5,14 @@
 #include "microkernel/actor.h"
 #include "microkernel/message.h"
 #include "microkernel/services.h"
+#include "microkernel/http.h"
 #include "wasm_export.h"
+
+/* WAMR internal: manage per-thread exec_env TLS.
+   When a fiber yields mid-execution, the TLS still points to its exec_env.
+   We must clear it on yield and restore on resume so other WASM actors can run. */
+void wasm_runtime_set_exec_env_tls(wasm_exec_env_t exec_env);
+wasm_exec_env_t wasm_runtime_get_exec_env_tls(void);
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,12 +100,14 @@ static int32_t mk_sleep_ms_native(wasm_exec_env_t env, int32_t ms) {
 
     actor_set_timer(s->rt, (uint64_t)ms, false);
     s->fiber_yielded = true;
+    wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
 #if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_switch(&s->fiber_ctx, &s->caller_ctx);
 #endif
     /* Resumed by behavior after timer fires */
+    wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
     return 0;
 }
 
@@ -111,12 +120,14 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
 
     s->recv_msg = NULL;
     s->fiber_yielded = true;
+    wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
 #if defined(HAVE_UCONTEXT)
     swapcontext(&s->fiber_ctx, &s->caller_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_switch(&s->fiber_ctx, &s->caller_ctx);
 #endif
     /* Resumed by behavior when a message arrives */
+    wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
 
     if (!s->recv_msg)
         return -1;
@@ -131,15 +142,148 @@ static int32_t mk_recv_native(wasm_exec_env_t env, uint32_t *type_out,
     return 0;
 }
 
+/* ── Shell host functions ─────────────────────────────────────────── */
+
+static void mk_print_native(wasm_exec_env_t env, uint8_t *text, int32_t len) {
+    (void)env;
+    if (len > 0 && text)
+        fwrite(text, 1, (size_t)len, stdout);
+    fflush(stdout);
+}
+
+static int64_t mk_spawn_wasm_native(wasm_exec_env_t env, uint8_t *buf,
+                                      int32_t size, int32_t mailbox) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!buf || size <= 0) return (int64_t)ACTOR_ID_INVALID;
+    actor_id_t id = actor_spawn_wasm(s->rt, buf, (size_t)size,
+                                      (size_t)mailbox,
+                                      WASM_DEFAULT_STACK_SIZE,
+                                      WASM_DEFAULT_HEAP_SIZE,
+                                      FIBER_STACK_SMALL);
+    return (int64_t)id;
+}
+
+static int32_t mk_stop_native(wasm_exec_env_t env, int64_t id) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    actor_stop(s->rt, (actor_id_t)id);
+    return 0;
+}
+
+static int32_t mk_list_actors_native(wasm_exec_env_t env, int64_t *buf,
+                                       int32_t max, uint32_t *count_out) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!buf || max <= 0) return -1;
+    actor_id_t local_buf[256];
+    size_t limit = (size_t)max < 256 ? (size_t)max : 256;
+    size_t n = runtime_list_actors(s->rt, local_buf, limit);
+    for (size_t i = 0; i < n; i++)
+        buf[i] = (int64_t)local_buf[i];
+    *count_out = (uint32_t)n;
+    return 0;
+}
+
+static int32_t mk_register_native(wasm_exec_env_t env, uint8_t *name,
+                                     int32_t len) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    char buf[64];
+    int n = len < 63 ? len : 63;
+    memcpy(buf, name, n);
+    buf[n] = '\0';
+    return actor_register_name(s->rt, buf, actor_self(s->rt)) ? 0 : -1;
+}
+
+static int64_t mk_lookup_native(wasm_exec_env_t env, uint8_t *name,
+                                   int32_t len) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    char buf[64];
+    int n = len < 63 ? len : 63;
+    memcpy(buf, name, n);
+    buf[n] = '\0';
+    return (int64_t)actor_lookup(s->rt, buf);
+}
+
+static int32_t mk_read_file_native(wasm_exec_env_t env, uint8_t *path,
+                                      int32_t path_len, uint8_t *buf,
+                                      int32_t buf_size, uint32_t *size_out) {
+    (void)env;
+    char path_str[512];
+    int pn = path_len < 511 ? path_len : 511;
+    memcpy(path_str, path, pn);
+    path_str[pn] = '\0';
+
+    FILE *f = fopen(path_str, "rb");
+    if (!f) return -1;
+
+    size_t n = fread(buf, 1, (size_t)buf_size, f);
+    fclose(f);
+    *size_out = (uint32_t)n;
+    return 0;
+}
+
+static int32_t mk_http_get_native(wasm_exec_env_t env, uint8_t *url,
+                                     int32_t url_len, uint8_t *buf,
+                                     int32_t buf_size, uint32_t *status_out,
+                                     uint32_t *size_out) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    if (!s->fiber_stack)
+        return -1;  /* no fiber — can't yield */
+
+    char url_str[1024];
+    int un = url_len < 1023 ? url_len : 1023;
+    memcpy(url_str, url, un);
+    url_str[un] = '\0';
+
+    actor_http_get(s->rt, url_str);
+
+    /* Yield fiber, loop until we get HTTP response or error */
+    for (;;) {
+        s->recv_msg = NULL;
+        s->fiber_yielded = true;
+        wasm_runtime_set_exec_env_tls(NULL);  /* clear before yield */
+#if defined(HAVE_UCONTEXT)
+        swapcontext(&s->fiber_ctx, &s->caller_ctx);
+#elif defined(ESP_PLATFORM)
+        fiber_switch(&s->fiber_ctx, &s->caller_ctx);
+#endif
+        wasm_runtime_set_exec_env_tls(env);  /* restore after resume */
+        if (!s->recv_msg) return -1;
+
+        if (s->recv_msg->type == MSG_HTTP_RESPONSE) {
+            const http_response_payload_t *resp = s->recv_msg->payload;
+            *status_out = (uint32_t)resp->status_code;
+            const void *body = http_response_body(resp);
+            size_t copy = resp->body_size < (size_t)buf_size
+                              ? resp->body_size : (size_t)buf_size;
+            if (copy > 0) memcpy(buf, body, copy);
+            *size_out = (uint32_t)resp->body_size;
+            return 0;
+        }
+        if (s->recv_msg->type == MSG_HTTP_ERROR) {
+            *status_out = 0;
+            *size_out = 0;
+            return -1;
+        }
+        /* Not an HTTP message — ignore and re-yield */
+    }
+}
+
 /* WAMR's NativeSymbol uses void* for func_ptr; suppress pedantic warning */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 static NativeSymbol native_symbols[] = {
-    { "mk_send",     mk_send_native,     "(Ii*~)i",   NULL },
-    { "mk_self",     mk_self_native,     "()I",       NULL },
-    { "mk_log",      mk_log_native,      "(i*~)",     NULL },
-    { "mk_sleep_ms", mk_sleep_ms_native, "(i)i",      NULL },
-    { "mk_recv",     mk_recv_native,     "(**~*)i",   NULL },
+    { "mk_send",       mk_send_native,       "(Ii*~)i",     NULL },
+    { "mk_self",       mk_self_native,       "()I",         NULL },
+    { "mk_log",        mk_log_native,        "(i*~)",       NULL },
+    { "mk_sleep_ms",   mk_sleep_ms_native,   "(i)i",        NULL },
+    { "mk_recv",       mk_recv_native,       "(**~*)i",     NULL },
+    { "mk_print",      mk_print_native,      "(*~)",        NULL },
+    { "mk_spawn_wasm", mk_spawn_wasm_native, "(*~i)I",      NULL },
+    { "mk_stop",       mk_stop_native,       "(I)i",        NULL },
+    { "mk_list_actors",mk_list_actors_native,"(*i*)i",      NULL },
+    { "mk_register",   mk_register_native,   "(*~)i",       NULL },
+    { "mk_lookup",     mk_lookup_native,     "(*~)I",       NULL },
+    { "mk_read_file",  mk_read_file_native,  "(*~*~*)i",    NULL },
+    { "mk_http_get",   mk_http_get_native,   "(*~*~**)i",   NULL },
 };
 #pragma GCC diagnostic pop
 
@@ -341,11 +485,13 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     if (state->fiber_yielded) {
         /* Stash message for mk_recv if the fiber was blocked on recv */
         state->recv_msg = msg;
+        wasm_runtime_set_exec_env_tls(state->exec_env);  /* restore TLS */
 #if defined(HAVE_UCONTEXT)
         swapcontext(&state->caller_ctx, &state->fiber_ctx);
 #elif defined(ESP_PLATFORM)
         fiber_switch(&state->caller_ctx, &state->fiber_ctx);
 #endif
+        wasm_runtime_set_exec_env_tls(NULL);  /* clear after yield/complete */
 
         if (state->fiber_yielded) {
             /* Fiber yielded again (another blocking call) — keep alive */
@@ -428,6 +574,7 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     unsigned int hi = (unsigned int)((addr >> 32) & 0xFFFFFFFF);
     makecontext(&state->fiber_ctx, (void (*)(void))fiber_entry, 2, lo, hi);
 
+    wasm_runtime_set_exec_env_tls(state->exec_env);  /* set TLS for fiber */
     swapcontext(&state->caller_ctx, &state->fiber_ctx);
 #elif defined(ESP_PLATFORM)
     fiber_init(&state->fiber_ctx, state->fiber_stack,
@@ -435,8 +582,10 @@ bool wasm_actor_behavior(runtime_t *rt, actor_t *self,
     /* Reset caller context for fresh switch */
     memset(&state->caller_ctx, 0, sizeof(state->caller_ctx));
     state->caller_ctx.started = true;
+    wasm_runtime_set_exec_env_tls(state->exec_env);  /* set TLS for fiber */
     fiber_switch(&state->caller_ctx, &state->fiber_ctx);
 #endif
+    wasm_runtime_set_exec_env_tls(NULL);  /* clear after yield/complete */
 
     if (state->fiber_yielded) {
         /* Fiber yielded — keep alive, don't free WASM buffer yet */

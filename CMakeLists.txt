@@ -16,3 +16,8 @@ add_subdirectory(src)
 
 enable_testing()
 add_subdirectory(tests)
+
+# Tools
+if(HAVE_WASM)
+    add_subdirectory(tools/shell)
+endif()
