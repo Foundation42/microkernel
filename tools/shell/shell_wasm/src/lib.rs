@@ -58,6 +58,8 @@ const MSG_SPAWN_RESPONSE: u32 = 103;
 const MSG_SPAWN_REQUEST_NAMED: u32 = 104;
 const MSG_MOUNT_REQUEST: u32 = 105;
 const MSG_MOUNT_RESPONSE: u32 = 106;
+const MSG_RELOAD_REQUEST: u32 = 107;
+const MSG_RELOAD_RESPONSE: u32 = 108;
 const MSG_CAPS_REQUEST: u32 = 0xFF00001D;
 const MSG_CAPS_REPLY: u32 = 0xFF00001E;
 
@@ -279,6 +281,7 @@ fn cmd_help() {
     print_str("  list                              List active actors\n");
     print_str("  ls /prefix                        List namespace entries by prefix\n");
     print_str("  load <path-or-url>                Load WASM actor from file or URL\n");
+    print_str("  reload <name> <path-or-url>       Hot-reload WASM actor in-place\n");
     print_str("  send <name-or-id> <type> [data]   Send message to actor\n");
     print_str("  call <name-or-id> <type> [data]   Send and wait for reply (5s)\n");
     print_str("  stop <name-or-id>                 Stop an actor\n");
@@ -453,6 +456,138 @@ fn handle_spawn_response(payload: *const u8, size: u32) {
             print_str("'");
         }
         print_str("\n");
+    }
+}
+
+fn cmd_reload(arg: &[u8]) {
+    let (name, path) = split_first_space(arg);
+    if name.is_empty() || path.is_empty() {
+        print_str("usage: reload <name> <path-or-url>\n");
+        return;
+    }
+
+    let is_url = starts_with(path, b"http://") || starts_with(path, b"https://");
+
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let mut size_out: u32 = 0;
+
+    if is_url {
+        let mut status: u32 = 0;
+        let rc = unsafe {
+            mk_http_get(
+                path.as_ptr(), path.len() as i32,
+                file_buf.as_mut_ptr(), file_buf.len() as i32,
+                &mut status, &mut size_out,
+            )
+        };
+        if rc < 0 {
+            print_str("error: HTTP GET failed\n");
+            return;
+        }
+        if status != 200 {
+            print_str("error: HTTP ");
+            print_u64(status as u64);
+            print_str("\n");
+            return;
+        }
+        print_str("Downloaded ");
+        print_u64(size_out as u64);
+        print_str(" bytes\n");
+    } else {
+        let rc = unsafe {
+            mk_read_file(
+                path.as_ptr(), path.len() as i32,
+                file_buf.as_mut_ptr(), file_buf.len() as i32,
+                &mut size_out,
+            )
+        };
+        if rc < 0 {
+            print_str("error: cannot read file\n");
+            return;
+        }
+        print_str("Read ");
+        print_u64(size_out as u64);
+        print_str(" bytes from file\n");
+    }
+
+    if size_out == 0 {
+        print_str("error: empty file/response\n");
+        return;
+    }
+
+    // Build payload: name_len(1) + name(name_len) + wasm_bytes
+    let name_len = if name.len() > 63 { 63 } else { name.len() };
+    let prefix_len = 1 + name_len;
+
+    if (size_out as usize) + prefix_len > file_buf.len() {
+        print_str("error: file too large for name prefix\n");
+        return;
+    }
+
+    // Shift WASM bytes right to make room for name prefix
+    unsafe {
+        core::ptr::copy(
+            file_buf.as_ptr(),
+            file_buf.as_mut_ptr().add(prefix_len),
+            size_out as usize,
+        );
+        file_buf[0] = name_len as u8;
+        core::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            file_buf.as_mut_ptr().add(1),
+            name_len,
+        );
+    }
+
+    // Send reload request to console actor
+    let console = unsafe { mk_lookup(b"console\0".as_ptr(), 7) };
+    if console == ACTOR_ID_INVALID {
+        print_str("error: console actor not found\n");
+        return;
+    }
+
+    let total = (size_out as usize + prefix_len) as i32;
+    let sent = unsafe {
+        mk_send(console, MSG_RELOAD_REQUEST as i32,
+                file_buf.as_ptr(), total)
+    };
+    if sent == 0 {
+        print_str("error: failed to send reload request\n");
+        return;
+    }
+    print_str("Reloading...\n");
+}
+
+fn handle_reload_response(payload: *const u8, size: u32) {
+    if size < 1 || payload.is_null() {
+        print_str("error: reload failed (bad response)\n");
+        return;
+    }
+    let status = unsafe { *payload };
+    match status {
+        0 => {
+            // RELOAD_OK: status(1) + new_actor_id(8)
+            if size >= 9 {
+                let mut bytes = [0u8; 8];
+                unsafe { core::ptr::copy_nonoverlapping(payload.add(1), bytes.as_mut_ptr(), 8) };
+                let id = i64::from_ne_bytes(bytes);
+                print_str("Reloaded → actor ");
+                print_u64(id as u64);
+                print_str("\n");
+            } else {
+                print_str("Reloaded OK\n");
+            }
+        }
+        1 => print_str("error: reload failed — actor not found\n"),
+        2 => print_str("error: reload failed — not a WASM actor\n"),
+        3 => print_str("error: reload failed — fiber active (actor is yielded)\n"),
+        4 => print_str("error: reload failed — bad WASM module\n"),
+        5 => print_str("error: reload failed — instance creation error\n"),
+        _ => {
+            print_str("error: reload failed (status=");
+            print_u64(status as u64);
+            print_str(")\n");
+        }
     }
 }
 
@@ -1165,6 +1300,8 @@ fn dispatch_command(line: &[u8]) {
         cmd_whoami();
     } else if cmd == b"load" {
         cmd_load(arg);
+    } else if cmd == b"reload" {
+        cmd_reload(arg);
     } else if cmd == b"send" {
         cmd_send(arg);
     } else if cmd == b"call" {
@@ -1249,6 +1386,11 @@ pub extern "C" fn handle_message(
 
             if recv_type == MSG_SPAWN_RESPONSE {
                 handle_spawn_response(input_buf.as_ptr(), recv_size);
+                continue;
+            }
+
+            if recv_type == MSG_RELOAD_RESPONSE {
+                handle_reload_response(input_buf.as_ptr(), recv_size);
                 continue;
             }
 

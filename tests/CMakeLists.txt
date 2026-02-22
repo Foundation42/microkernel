@@ -62,9 +62,48 @@ if(HAVE_WASM)
                     ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/stateful.c
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/stateful.c
             COMMENT "Compiling stateful.wasm")
+        add_custom_command(
+            OUTPUT ${WASM_OUT_DIR}/counter_v1.wasm
+            COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
+                    -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -o ${WASM_OUT_DIR}/counter_v1.wasm
+                    ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1.c
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1.c
+            COMMENT "Compiling counter_v1.wasm")
+        add_custom_command(
+            OUTPUT ${WASM_OUT_DIR}/counter_v2.wasm
+            COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
+                    -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -o ${WASM_OUT_DIR}/counter_v2.wasm
+                    ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2.c
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2.c
+            COMMENT "Compiling counter_v2.wasm")
+        find_program(WAT2WASM wat2wasm)
+        if(WAT2WASM)
+            add_custom_command(
+                OUTPUT ${WASM_OUT_DIR}/counter_v1_lite.wasm
+                COMMAND ${WAT2WASM}
+                        -o ${WASM_OUT_DIR}/counter_v1_lite.wasm
+                        ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1_lite.wat
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1_lite.wat
+                COMMENT "Assembling counter_v1_lite.wasm (WAT, zero linear memory)")
+            add_custom_command(
+                OUTPUT ${WASM_OUT_DIR}/counter_v2_lite.wasm
+                COMMAND ${WAT2WASM}
+                        -o ${WASM_OUT_DIR}/counter_v2_lite.wasm
+                        ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2_lite.wat
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2_lite.wat
+                COMMENT "Assembling counter_v2_lite.wasm (WAT, zero linear memory)")
+        else()
+            message(STATUS "wat2wasm not found — counter_*_lite.wasm skipped")
+        endif()
         add_custom_target(wasm_test_modules ALL DEPENDS
             ${WASM_OUT_DIR}/echo.wasm
-            ${WASM_OUT_DIR}/stateful.wasm)
+            ${WASM_OUT_DIR}/stateful.wasm
+            ${WASM_OUT_DIR}/counter_v1.wasm
+            ${WASM_OUT_DIR}/counter_v2.wasm
+            ${WASM_OUT_DIR}/counter_v1_lite.wasm
+            ${WASM_OUT_DIR}/counter_v2_lite.wasm)
 
         add_microkernel_test(test_wasm_actor)
         add_dependencies(test_wasm_actor wasm_test_modules)
@@ -74,6 +113,11 @@ if(HAVE_WASM)
         add_microkernel_test(test_state_persist)
         add_dependencies(test_state_persist wasm_test_modules)
         target_compile_definitions(test_state_persist PRIVATE
+            WASM_MODULE_DIR="${WASM_OUT_DIR}")
+
+        add_microkernel_test(test_hot_reload)
+        add_dependencies(test_hot_reload wasm_test_modules)
+        target_compile_definitions(test_hot_reload PRIVATE
             WASM_MODULE_DIR="${WASM_OUT_DIR}")
     else()
         message(STATUS "WASM test: skipped (clang not found)")

@@ -24,6 +24,8 @@
 #define MSG_SPAWN_REQUEST_NAMED  104
 #define MSG_MOUNT_REQUEST        105
 #define MSG_MOUNT_RESPONSE       106
+#define MSG_RELOAD_REQUEST       107
+#define MSG_RELOAD_RESPONSE      108
 
 /* ── Console actor: watches stdin, sends lines, handles spawn requests ── */
 
@@ -161,6 +163,48 @@ static bool console_behavior(runtime_t *rt, actor_t *self,
             resp[0] = 1;
             actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
         }
+        return true;
+    }
+
+    if (msg->type == MSG_RELOAD_REQUEST) {
+        /* Payload: name_len(1) + name(name_len) + wasm_bytes */
+        uint8_t resp[9] = { 0 };  /* status(1) + new_actor_id(8) */
+        if (!msg->payload || msg->payload_size < 2) {
+            resp[0] = 1;  /* error */
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        const uint8_t *p = msg->payload;
+        uint8_t name_len = p[0];
+        if (name_len > 63) name_len = 63;
+        if (msg->payload_size < (size_t)(1 + name_len)) {
+            resp[0] = 1;
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        char name[64];
+        memcpy(name, &p[1], name_len);
+        name[name_len] = '\0';
+
+        const uint8_t *wasm_bytes = &p[1 + name_len];
+        size_t wasm_size = msg->payload_size - 1 - name_len;
+
+        /* Resolve name to actor ID */
+        actor_id_t target = actor_lookup(rt, name);
+        if (target == ACTOR_ID_INVALID) {
+            resp[0] = 2;  /* not found */
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        actor_id_t new_id;
+        reload_result_t rc = actor_reload_wasm(rt, target, wasm_bytes,
+                                                wasm_size, &new_id);
+        resp[0] = (uint8_t)rc;
+        memcpy(&resp[1], &new_id, 8);
+        actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
         return true;
     }
 

@@ -217,6 +217,31 @@ actor_id_t supervisor_get_child(runtime_t *rt, actor_id_t sup_id,
     return st->children[index];
 }
 
+void *supervisor_get_factory_arg(runtime_t *rt, actor_id_t sup_id,
+                                  size_t index) {
+    supervisor_state_t *st = (supervisor_state_t *)runtime_get_actor_state(rt, sup_id);
+    if (!st || index >= st->n_specs) return NULL;
+    return st->specs[index].factory_arg;
+}
+
+int supervisor_replace_child(runtime_t *rt, actor_id_t sup_id,
+                              actor_id_t old_child, actor_id_t new_child,
+                              void *new_factory_arg, void **old_factory_arg_out) {
+    supervisor_state_t *st = (supervisor_state_t *)runtime_get_actor_state(rt, sup_id);
+    if (!st) return -1;
+
+    for (size_t i = 0; i < st->n_specs; i++) {
+        if (st->children[i] == old_child) {
+            st->children[i] = new_child;
+            if (old_factory_arg_out)
+                *old_factory_arg_out = st->specs[i].factory_arg;
+            st->specs[i].factory_arg = new_factory_arg;
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
 void supervisor_stop(runtime_t *rt, actor_id_t sup_id) {
     supervisor_state_t *st = (supervisor_state_t *)runtime_get_actor_state(rt, sup_id);
     if (st) {

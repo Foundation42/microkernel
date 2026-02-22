@@ -911,6 +911,21 @@ void *runtime_get_actor_state(runtime_t *rt, actor_id_t id) {
     return a ? a->state : NULL;
 }
 
+/* ── Direct actor access (Phase 20: hot reload) ────────────────────── */
+
+actor_t *runtime_get_actor(runtime_t *rt, actor_id_t id) {
+    uint32_t seq = actor_id_seq(id);
+    if (seq == 0 || seq >= rt->max_actors) return NULL;
+    return rt->actors[seq];
+}
+
+void runtime_schedule_actor(runtime_t *rt, actor_id_t id) {
+    actor_t *a = runtime_get_actor(rt, id);
+    if (a && a->status == ACTOR_IDLE && !mailbox_is_empty(a->mailbox)) {
+        scheduler_enqueue(&rt->scheduler, a);
+    }
+}
+
 /* ── State persistence accessors ───────────────────────────────────── */
 
 const char *runtime_get_state_path(runtime_t *rt) {

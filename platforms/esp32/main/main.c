@@ -6,6 +6,7 @@
 #include <sys/poll.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <esp_spiffs.h>
 #include <esp_vfs_eventfd.h>
 #include <soc/soc_caps.h>
@@ -47,6 +48,81 @@ extern const uint8_t shell_wasm_start[] asm("_binary_shell_wasm_start");
 extern const uint8_t shell_wasm_end[]   asm("_binary_shell_wasm_end");
 
 static const char *TAG = "mk_smoke";
+
+#if SOC_WIFI_SUPPORTED
+/* ── WiFi initialization ──────────────────────────────────────────── */
+/* Placed before smoke tests so both smoke tests and shell can use it */
+
+#define WIFI_CONNECTED_BIT BIT0
+
+static EventGroupHandle_t s_wifi_event_group;
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                                int32_t event_id, void *event_data) {
+    (void)arg;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *disc =
+            (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "WiFi disconnected (reason=%d), retrying...", disc->reason);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+static bool wifi_init(void) {
+    ESP_LOGI(TAG, "Initializing WiFi — SSID=\"%s\" pass=\"%s\"", WIFI_SSID, WIFI_PASSWORD);
+
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    s_wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_connect());
+
+    /* Wait up to 60 seconds for IP (weak signal may need many auth retries) */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+        WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(60000));
+
+    if (!(bits & WIFI_CONNECTED_BIT)) {
+        ESP_LOGE(TAG, "WiFi connection timed out");
+        return false;
+    }
+    return true;
+}
+#endif /* SOC_WIFI_SUPPORTED */
+
+#ifdef RUN_SMOKE_TESTS
 
 /* ── Test 1: Ping-pong actors ──────────────────────────────────────── */
 
@@ -177,77 +253,6 @@ static bool test_timer(void) {
 }
 
 #if SOC_WIFI_SUPPORTED
-
-/* ── WiFi initialization ──────────────────────────────────────────── */
-
-#define WIFI_CONNECTED_BIT BIT0
-
-static EventGroupHandle_t s_wifi_event_group;
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                                int32_t event_id, void *event_data) {
-    (void)arg;
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t *disc =
-            (wifi_event_sta_disconnected_t *)event_data;
-        ESP_LOGW(TAG, "WiFi disconnected (reason=%d), retrying...", disc->reason);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
-static bool wifi_init(void) {
-    ESP_LOGI(TAG, "Initializing WiFi — SSID=\"%s\" pass=\"%s\"", WIFI_SSID, WIFI_PASSWORD);
-
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    s_wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_connect());
-
-    /* Wait up to 60 seconds for IP (weak signal may need many auth retries) */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-        WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(60000));
-
-    if (!(bits & WIFI_CONNECTED_BIT)) {
-        ESP_LOGE(TAG, "WiFi connection timed out");
-        return false;
-    }
-    return true;
-}
-
 /* ── Test 3: TCP loopback transport ───────────────────────────────── */
 
 #define TCP_TEST_PORT 19900
@@ -1588,6 +1593,7 @@ static void *wasm_test_runner(void *arg) {
     wasm_actors_cleanup();
     return NULL;
 }
+#endif /* RUN_SMOKE_TESTS */
 
 /* ── Interactive WASM Shell ─────────────────────────────────────────── */
 
@@ -1598,6 +1604,8 @@ static void *wasm_test_runner(void *arg) {
 #define MSG_SPAWN_REQUEST_NAMED  104
 #define MSG_MOUNT_REQUEST        105
 #define MSG_MOUNT_RESPONSE       106
+#define MSG_RELOAD_REQUEST       107
+#define MSG_RELOAD_RESPONSE      108
 
 typedef struct {
     actor_id_t shell;
@@ -1627,8 +1635,8 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
             new_id = actor_spawn_wasm(rt, msg->payload, msg->payload_size,
                                        32,
                                        WASM_DEFAULT_STACK_SIZE,
-                                       4096,  /* small app heap */
-                                       FIBER_STACK_NONE);
+                                       0,  /* no app heap — modules use static buffers */
+                                       FIBER_STACK_TINY);
         }
         actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
                    &new_id, sizeof(new_id));
@@ -1671,8 +1679,8 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
         if (wasm_size > 0) {
             new_id = actor_spawn_wasm(rt, wasm_bytes, wasm_size, 32,
                                        WASM_DEFAULT_STACK_SIZE,
-                                       4096,  /* small app heap */
-                                       FIBER_STACK_NONE);
+                                       0,  /* no app heap — modules use static buffers */
+                                       FIBER_STACK_TINY);
         }
 
         if (new_id != ACTOR_ID_INVALID) {
@@ -1742,6 +1750,48 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
             resp[0] = 1;
             actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
         }
+        return true;
+    }
+
+    if (msg->type == MSG_RELOAD_REQUEST) {
+        /* Payload: name_len(1) + name(name_len) + wasm_bytes */
+        uint8_t resp[9] = { 0 };  /* status(1) + new_actor_id(8) */
+        if (!msg->payload || msg->payload_size < 2) {
+            resp[0] = 1;  /* error */
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        const uint8_t *p = msg->payload;
+        uint8_t name_len = p[0];
+        if (name_len > 63) name_len = 63;
+        if (msg->payload_size < (size_t)(1 + name_len)) {
+            resp[0] = 1;
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        char name[64];
+        memcpy(name, &p[1], name_len);
+        name[name_len] = '\0';
+
+        const uint8_t *wasm_bytes = &p[1 + name_len];
+        size_t wasm_size = msg->payload_size - 1 - name_len;
+
+        /* Resolve name to actor ID */
+        actor_id_t target = actor_lookup(rt, name);
+        if (target == ACTOR_ID_INVALID) {
+            resp[0] = 2;  /* not found */
+            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+            return true;
+        }
+
+        actor_id_t new_id;
+        reload_result_t rc = actor_reload_wasm(rt, target, wasm_bytes,
+                                                wasm_size, &new_id);
+        resp[0] = (uint8_t)rc;
+        memcpy(&resp[1], &new_id, 8);
+        actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
         return true;
     }
 
@@ -1841,13 +1891,15 @@ static void *shell_runner(void *arg) {
     /* Redirect mk_print output to the TCP socket */
     wasm_actor_set_print_fd(client_fd);
 
+    /* Use system allocator for WAMR. With smoke tests disabled, the heap
+       is not fragmented, so 64KB contiguous blocks are available. */
     if (!wasm_actors_init()) {
         ESP_LOGE(TAG, "shell: wasm_actors_init failed");
         close(client_fd);
         return NULL;
     }
 
-    runtime_t *rt = runtime_init(mk_node_id(), 32);
+    runtime_t *rt = runtime_init(mk_node_id(), 16);
     if (!rt) {
         ESP_LOGE(TAG, "shell: runtime_init failed");
         wasm_actors_cleanup();
@@ -1890,7 +1942,7 @@ static void *shell_runner(void *arg) {
     actor_id_t shell = actor_spawn_wasm(rt, shell_wasm_start, shell_size, 32,
                                          WASM_DEFAULT_STACK_SIZE,
                                          0,  /* no app heap — static buffers */
-                                         FIBER_STACK_MEDIUM);
+                                         FIBER_STACK_TINY);
     if (shell == ACTOR_ID_INVALID) {
         ESP_LOGE(TAG, "shell: cannot spawn shell.wasm");
         runtime_destroy(rt);
@@ -1939,6 +1991,7 @@ void app_main(void) {
     };
     ESP_ERROR_CHECK(esp_vfs_eventfd_register(&eventfd_config));
 
+#ifdef RUN_SMOKE_TESTS
     bool pass = true;
 
     if (!test_pingpong()) pass = false;
@@ -1996,6 +2049,9 @@ void app_main(void) {
         ESP_LOGE(TAG, "Some smoke tests FAILED!");
     }
 #endif
+#else
+    ESP_LOGI(TAG, "Smoke tests disabled (RUN_SMOKE_TESTS not defined)");
+#endif /* RUN_SMOKE_TESTS */
 
     /* Mount SPIFFS for file storage (used by shell's "load" command) */
     {
@@ -2017,6 +2073,13 @@ void app_main(void) {
     }
 
 #if SOC_WIFI_SUPPORTED
+#ifndef RUN_SMOKE_TESTS
+    /* WiFi init when smoke tests are disabled (they normally init WiFi) */
+    if (!wifi_init()) {
+        ESP_LOGE(TAG, "WiFi init failed, cannot start shell");
+        return;
+    }
+#endif
     /* Launch interactive WASM shell (TCP, port 23).
        Runs in a pthread (WAMR requirement). */
     ESP_LOGI(TAG, "Starting interactive shell (TCP)...");

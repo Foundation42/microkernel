@@ -4,10 +4,13 @@
 #include "microkernel/runtime.h"
 #include "microkernel/actor.h"
 #include "microkernel/message.h"
+#include "microkernel/mailbox.h"
 #include "microkernel/services.h"
 #include "microkernel/http.h"
 #include "microkernel/namespace.h"
 #include "microkernel/state_persist.h"
+#include "microkernel/supervision.h"
+#include "runtime_internal.h"
 #include "wasm_export.h"
 #include <unistd.h>
 #ifdef ESP_PLATFORM
@@ -83,6 +86,11 @@ typedef struct {
 
     /* WASM-side payload buffer offset (for cleanup after fiber completes) */
     uint64_t      wasm_buf_offset;
+
+    /* Sizing config (preserved for hot reload) */
+    uint32_t            cfg_stack_size;
+    uint32_t            cfg_heap_size;
+    fiber_stack_class_t cfg_fiber_stack;
 } wasm_actor_state_t;
 
 /* ── Host functions ───────────────────────────────────────────────── */
@@ -92,6 +100,13 @@ static int32_t mk_send_native(wasm_exec_env_t env, int64_t dest,
     wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
     return actor_send(s->rt, (actor_id_t)dest, (msg_type_t)type,
                       payload, (size_t)size) ? 1 : 0;
+}
+
+static int32_t mk_send_u32_native(wasm_exec_env_t env, int64_t dest,
+                                    int32_t type, int32_t value) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    return actor_send(s->rt, (actor_id_t)dest, (msg_type_t)type,
+                      &value, sizeof(value)) ? 1 : 0;
 }
 
 static int64_t mk_self_native(wasm_exec_env_t env) {
@@ -441,6 +456,7 @@ static int64_t mk_time_ms_native(wasm_exec_env_t env) {
 #pragma GCC diagnostic ignored "-Wpedantic"
 static NativeSymbol native_symbols[] = {
     { "mk_send",       mk_send_native,       "(Ii*~)i",     NULL },
+    { "mk_send_u32",   mk_send_u32_native,   "(Iii)i",      NULL },
     { "mk_self",       mk_self_native,       "()I",         NULL },
     { "mk_log",        mk_log_native,        "(i*~)",       NULL },
     { "mk_sleep_ms",   mk_sleep_ms_native,   "(i)i",        NULL },
@@ -466,14 +482,27 @@ static NativeSymbol native_symbols[] = {
 
 /* ── Init / cleanup ───────────────────────────────────────────────── */
 
+static bool wasm_actors_init_common(RuntimeInitArgs *init_args) {
+    init_args->native_module_name = "env";
+    init_args->native_symbols = native_symbols;
+    init_args->n_native_symbols = sizeof(native_symbols) / sizeof(NativeSymbol);
+    return wasm_runtime_full_init(init_args);
+}
+
 bool wasm_actors_init(void) {
     RuntimeInitArgs init_args;
     memset(&init_args, 0, sizeof(init_args));
     init_args.mem_alloc_type = Alloc_With_System_Allocator;
-    init_args.native_module_name = "env";
-    init_args.native_symbols = native_symbols;
-    init_args.n_native_symbols = sizeof(native_symbols) / sizeof(NativeSymbol);
-    return wasm_runtime_full_init(&init_args);
+    return wasm_actors_init_common(&init_args);
+}
+
+bool wasm_actors_init_pool(void *pool_buf, size_t pool_size) {
+    RuntimeInitArgs init_args;
+    memset(&init_args, 0, sizeof(init_args));
+    init_args.mem_alloc_type = Alloc_With_Pool;
+    init_args.mem_alloc_option.pool.heap_buf = pool_buf;
+    init_args.mem_alloc_option.pool.heap_size = (uint32_t)pool_size;
+    return wasm_actors_init_common(&init_args);
 }
 
 void wasm_actors_cleanup(void) {
@@ -609,6 +638,9 @@ void *wasm_actor_factory(void *arg_ptr) {
 
     wasm_runtime_set_user_data(state->exec_env, state);
     state->owns_module = false;
+    state->cfg_stack_size = arg->stack_size;
+    state->cfg_heap_size = arg->heap_size;
+    state->cfg_fiber_stack = arg->fiber_stack;
 
     /* Allocate fiber stack if requested */
     if (arg->fiber_stack != FIBER_STACK_NONE) {
@@ -849,6 +881,130 @@ actor_id_t actor_spawn_wasm_file(runtime_t *rt, const char *path,
                                       stack_size, heap_size, fiber_stack);
     free(buf);
     return id;
+}
+
+/* ── Hot code reload ───────────────────────────────────────────────── */
+
+reload_result_t actor_reload_wasm(runtime_t *rt, actor_id_t old_id,
+                                   const uint8_t *new_buf, size_t new_size,
+                                   actor_id_t *new_id_out) {
+    if (new_id_out) *new_id_out = ACTOR_ID_INVALID;
+
+    /* 1. Find old actor */
+    actor_t *old = runtime_get_actor(rt, old_id);
+    if (!old || old->status == ACTOR_STOPPED)
+        return RELOAD_ERR_NOT_FOUND;
+
+    /* 2. Verify it's a WASM actor */
+    if (old->behavior != wasm_actor_behavior)
+        return RELOAD_ERR_NOT_WASM;
+
+    /* 3. Check fiber not yielded */
+    wasm_actor_state_t *old_state = (wasm_actor_state_t *)old->state;
+    if (old_state->fiber_yielded)
+        return RELOAD_ERR_FIBER_ACTIVE;
+
+    /* 4. Read sizing config from old state */
+    uint32_t stack_size = old_state->cfg_stack_size;
+    uint32_t heap_size  = old_state->cfg_heap_size;
+    fiber_stack_class_t fiber_stack = old_state->cfg_fiber_stack;
+
+    /* 5. Create new factory arg (validates + loads module) */
+    wasm_factory_arg_t *new_farg = wasm_factory_arg_create(
+        new_buf, new_size, stack_size, heap_size, fiber_stack);
+    if (!new_farg)
+        return RELOAD_ERR_MODULE_LOAD;
+
+    /* 6. Create new actor instance */
+    wasm_actor_state_t *new_state = wasm_actor_factory(new_farg);
+    if (!new_state) {
+        wasm_factory_arg_destroy(new_farg);
+        return RELOAD_ERR_INSTANCE;
+    }
+
+    /* 7. Spawn new actor with same mailbox capacity */
+    actor_id_t new_id = actor_spawn(rt, wasm_actor_behavior, new_state,
+                                     wasm_actor_free, old->mailbox->capacity);
+    if (new_id == ACTOR_ID_INVALID) {
+        wasm_actor_free(new_state);
+        wasm_factory_arg_destroy(new_farg);
+        return RELOAD_ERR_INSTANCE;
+    }
+
+    /* 8. Transfer names: scan registry for old_id, re-register as new_id */
+    name_entry_t *reg = runtime_get_name_registry(rt);
+    size_t reg_cap = runtime_get_name_registry_size();
+    for (size_t i = 0; i < reg_cap; i++) {
+        if (reg[i].occupied && reg[i].actor_id == old_id) {
+            char name_copy[64];
+            strncpy(name_copy, reg[i].name, sizeof(name_copy) - 1);
+            name_copy[sizeof(name_copy) - 1] = '\0';
+            /* Remove old entry and insert with new ID */
+            name_registry_remove_by_name(rt, name_copy);
+            name_registry_insert(rt, name_copy, new_id);
+            /* Broadcast update to peers */
+            name_register_payload_t payload;
+            memset(&payload, 0, sizeof(payload));
+            strncpy(payload.name, name_copy, 64 - 1);
+            payload.actor_id = new_id;
+            runtime_broadcast_registry(rt, MSG_NAME_REGISTER,
+                                        &payload, sizeof(payload));
+        }
+    }
+
+    /* 9. Forward queued mailbox messages */
+    actor_t *new_actor = runtime_get_actor(rt, new_id);
+    message_t *msg;
+    while ((msg = mailbox_dequeue(old->mailbox)) != NULL) {
+        mailbox_enqueue(new_actor->mailbox, msg);
+    }
+
+    /* 10. Handle supervision */
+    if (old->parent != ACTOR_ID_INVALID) {
+        void *old_farg_out = NULL;
+        int idx = supervisor_replace_child(rt, old->parent,
+                                            old_id, new_id,
+                                            new_farg, &old_farg_out);
+        if (idx >= 0) {
+            /* Set new actor's parent */
+            runtime_set_actor_parent(rt, new_id, old->parent);
+            /* Clear old actor's parent to suppress restart */
+            old->parent = ACTOR_ID_INVALID;
+            /* The supervisor now owns new_farg; new_state uses supervised module */
+            new_state->owns_module = false;
+            /* Destroy old factory arg */
+            if (old_farg_out)
+                wasm_factory_arg_destroy(old_farg_out);
+        } else {
+            /* Supervisor didn't know about old child (shouldn't happen) —
+               treat as standalone */
+            new_state->owns_module = true;
+            new_state->module = new_farg->module;
+            new_state->module_buf = new_farg->wasm_buf;
+            new_farg->module = NULL;
+            new_farg->wasm_buf = NULL;
+            wasm_factory_arg_destroy(new_farg);
+            old->parent = ACTOR_ID_INVALID;
+        }
+    } else {
+        /* Standalone actor: transfer module ownership */
+        new_state->owns_module = true;
+        new_state->module = new_farg->module;
+        new_state->module_buf = new_farg->wasm_buf;
+        new_farg->module = NULL;
+        new_farg->wasm_buf = NULL;
+        wasm_factory_arg_destroy(new_farg);
+    }
+
+    /* 11. Stop old actor (no parent = no restart notification) */
+    old->exit_reason = EXIT_KILLED;
+    old->status = ACTOR_STOPPED;
+
+    /* 12. Schedule new actor if it has forwarded messages */
+    runtime_schedule_actor(rt, new_id);
+
+    if (new_id_out) *new_id_out = new_id;
+    return RELOAD_OK;
 }
 
 #endif /* HAVE_WASM */

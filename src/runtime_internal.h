@@ -177,4 +177,8 @@ void name_registry_remove_by_name(runtime_t *rt, const char *name);
 const char *runtime_get_state_path(runtime_t *rt);
 void        runtime_set_state_path(runtime_t *rt, const char *path);
 
+/* Phase 20: Direct actor access and scheduling (for hot reload) */
+actor_t *runtime_get_actor(runtime_t *rt, actor_id_t id);
+void     runtime_schedule_actor(runtime_t *rt, actor_id_t id);
+
 #endif /* RUNTIME_INTERNAL_H */

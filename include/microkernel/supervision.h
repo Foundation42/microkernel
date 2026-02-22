@@ -54,4 +54,16 @@ actor_id_t supervisor_get_child(runtime_t *rt, actor_id_t sup_id,
 /* Stop supervisor and all its children */
 void supervisor_stop(runtime_t *rt, actor_id_t sup_id);
 
+/* Get the factory_arg for the Nth child spec (for cleanup after reload) */
+void *supervisor_get_factory_arg(runtime_t *rt, actor_id_t sup_id,
+                                  size_t index);
+
+/* Replace a child in-place (for hot reload).
+   Swaps old_child → new_child in children[], replaces factory_arg in spec.
+   Returns child index (>=0) on success, -1 if old_child not found.
+   *old_factory_arg_out receives the previous factory_arg (caller frees). */
+int supervisor_replace_child(runtime_t *rt, actor_id_t sup_id,
+                              actor_id_t old_child, actor_id_t new_child,
+                              void *new_factory_arg, void **old_factory_arg_out);
+
 #endif /* MICROKERNEL_SUPERVISION_H */
