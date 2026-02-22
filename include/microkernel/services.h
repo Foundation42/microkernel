@@ -46,11 +46,17 @@
 #define MSG_GPIO_READ         ((msg_type_t)0xFF000022)
 #define MSG_GPIO_SUBSCRIBE    ((msg_type_t)0xFF000023)
 #define MSG_GPIO_UNSUBSCRIBE  ((msg_type_t)0xFF000024)
-/* 0xFF000025–0xFF000027 reserved for PWM/ADC */
+/* 0xFF000025–0xFF000027 reserved for ADC */
 #define MSG_GPIO_OK           ((msg_type_t)0xFF000028)
 #define MSG_GPIO_VALUE        ((msg_type_t)0xFF000029)
 #define MSG_GPIO_ERROR        ((msg_type_t)0xFF00002A)
 #define MSG_GPIO_EVENT        ((msg_type_t)0xFF00002B)
+
+/* Phase 23: PWM actor */
+#define MSG_PWM_CONFIGURE     ((msg_type_t)0xFF00002C)
+#define MSG_PWM_SET_DUTY      ((msg_type_t)0xFF00002D)
+#define MSG_PWM_OK            ((msg_type_t)0xFF00002E)
+#define MSG_PWM_ERROR         ((msg_type_t)0xFF00002F)
 
 /* Phase 22: I2C actor */
 #define MSG_I2C_CONFIGURE     ((msg_type_t)0xFF000030)
@@ -63,6 +69,17 @@
 #define MSG_I2C_DATA          ((msg_type_t)0xFF000039)
 #define MSG_I2C_ERROR         ((msg_type_t)0xFF00003A)
 #define MSG_I2C_SCAN_RESULT   ((msg_type_t)0xFF00003B)
+
+/* Phase 23: LED actor */
+#define MSG_LED_CONFIGURE     ((msg_type_t)0xFF000040)
+#define MSG_LED_SET_PIXEL     ((msg_type_t)0xFF000041)
+#define MSG_LED_SET_ALL       ((msg_type_t)0xFF000042)
+#define MSG_LED_SET_BRIGHTNESS ((msg_type_t)0xFF000043)
+#define MSG_LED_CLEAR         ((msg_type_t)0xFF000044)
+#define MSG_LED_SHOW          ((msg_type_t)0xFF000045)
+/* 0xFF000046–0xFF00004B reserved for LED extensions */
+#define MSG_LED_OK            ((msg_type_t)0xFF00004C)
+#define MSG_LED_ERROR         ((msg_type_t)0xFF00004D)
 
 /* ── Timer payload ─────────────────────────────────────────────────── */
 

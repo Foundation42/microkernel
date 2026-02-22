@@ -42,6 +42,8 @@ add_microkernel_test(test_cf_proxy)
 add_microkernel_test(test_local_kv)
 add_microkernel_test(test_gpio)
 add_microkernel_test(test_i2c)
+add_microkernel_test(test_pwm)
+add_microkernel_test(test_led)
 
 # Phase 12: WASM actor test
 if(HAVE_WASM)

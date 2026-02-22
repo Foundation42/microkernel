@@ -25,6 +25,8 @@
 #include "microkernel/state_persist.h"
 #include "microkernel/gpio.h"
 #include "microkernel/i2c.h"
+#include "microkernel/pwm.h"
+#include "microkernel/led.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1943,6 +1945,26 @@ static void *shell_runner(void *arg) {
                      (uint64_t)i2c_id);
         else
             ESP_LOGW(TAG, "shell: i2c actor init failed");
+    }
+
+    /* Start PWM actor */
+    {
+        actor_id_t pwm_id = pwm_actor_init(rt);
+        if (pwm_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: pwm actor started (id=%" PRIu64 ")",
+                     (uint64_t)pwm_id);
+        else
+            ESP_LOGW(TAG, "shell: pwm actor init failed");
+    }
+
+    /* Start LED actor */
+    {
+        actor_id_t led_id = led_actor_init(rt);
+        if (led_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: led actor started (id=%" PRIu64 ")",
+                     (uint64_t)led_id);
+        else
+            ESP_LOGW(TAG, "shell: led actor init failed");
     }
 
 #ifdef CF_PROXY_URL

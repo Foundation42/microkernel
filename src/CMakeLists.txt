@@ -28,6 +28,10 @@ add_library(microkernel STATIC
     gpio_hal_linux.c
     i2c_actor.c
     i2c_hal_linux.c
+    pwm_actor.c
+    pwm_hal_linux.c
+    led_actor.c
+    led_hal_linux.c
 )
 
 target_include_directories(microkernel PUBLIC

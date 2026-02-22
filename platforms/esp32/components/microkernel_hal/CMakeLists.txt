@@ -13,10 +13,12 @@ idf_component_register(
         "mk_socket_tls_esp.c"
         "gpio_esp32.c"
         "i2c_esp32.c"
+        "pwm_esp32.c"
+        "led_esp32.c"
         ${FIBER_SRCS}
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../src"
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
-    PRIV_REQUIRES esp_timer vfs esp-tls driver ${FIBER_REQUIRES}
+    PRIV_REQUIRES esp_timer vfs esp-tls driver led_strip ${FIBER_REQUIRES}
 )
