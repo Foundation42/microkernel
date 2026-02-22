@@ -8,6 +8,8 @@
  * Wire protocol: newline-delimited JSON over WebSocket.
  */
 
+import { ensureMigrations } from "./migrations";
+
 interface Env {
   KV: KVNamespace;
   DB: D1Database;
@@ -174,6 +176,7 @@ async function handleMessage(
     }
     session.nodeId = msg.node_id as string;
     session.authed = true;
+    try { await ensureMigrations(env.DB); } catch { /* non-fatal */ }
     return JSON.stringify({ type: "auth_ok", tenant: session.nodeId });
   }
 
