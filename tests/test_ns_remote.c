@@ -10,7 +10,7 @@
 #include <sys/wait.h>
 #include <string.h>
 
-#define TEST_PORT 19895
+#define TEST_PORT 19897
 #define NODE_A 1
 #define NODE_B 2
 #define MSG_PING  200
