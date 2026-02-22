@@ -1636,7 +1636,7 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
                                        32,
                                        WASM_DEFAULT_STACK_SIZE,
                                        0,  /* no app heap — modules use static buffers */
-                                       FIBER_STACK_TINY);
+                                       FIBER_STACK_NONE);  /* no fiber — saves 16KB heap */
         }
         actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
                    &new_id, sizeof(new_id));
@@ -1680,7 +1680,7 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
             new_id = actor_spawn_wasm(rt, wasm_bytes, wasm_size, 32,
                                        WASM_DEFAULT_STACK_SIZE,
                                        0,  /* no app heap — modules use static buffers */
-                                       FIBER_STACK_TINY);
+                                       FIBER_STACK_NONE);  /* no fiber — saves 16KB heap */
         }
 
         if (new_id != ACTOR_ID_INVALID) {

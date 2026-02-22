@@ -66,18 +66,20 @@ if(HAVE_WASM)
             OUTPUT ${WASM_OUT_DIR}/counter_v1.wasm
             COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
                     -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -z stack-size=1024
                     -o ${WASM_OUT_DIR}/counter_v1.wasm
                     ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1.c
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v1.c
-            COMMENT "Compiling counter_v1.wasm")
+            COMMENT "Compiling counter_v1.wasm (1KB aux stack)")
         add_custom_command(
             OUTPUT ${WASM_OUT_DIR}/counter_v2.wasm
             COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
                     -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -z stack-size=1024
                     -o ${WASM_OUT_DIR}/counter_v2.wasm
                     ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2.c
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/counter_v2.c
-            COMMENT "Compiling counter_v2.wasm")
+            COMMENT "Compiling counter_v2.wasm (1KB aux stack)")
         find_program(WAT2WASM wat2wasm)
         if(WAT2WASM)
             add_custom_command(
