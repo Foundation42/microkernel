@@ -26,8 +26,9 @@ scheduler with integrated I/O polling.
 - **Hot code reload** -- atomic WASM module swap preserving names, mailbox, and supervisor state; shell `reload` command
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
-- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop/reload actors, send messages, load `.wasm` from files or URLs, persistent command history via Cloudflare KV
-- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, and interactive shell
+- **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
+- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop/reload actors, send messages (text or hex-encoded binary), load `.wasm` from files or URLs, persistent command history via Cloudflare KV
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, and interactive shell
 
 ## Building (Linux)
 
@@ -37,7 +38,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-35 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+39 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules and optionally `wat2wasm` (from wabt) for zero-linear-memory WAT modules.
 The WAMR submodule auto-initializes on first build.
@@ -269,11 +270,16 @@ no allocator). A C console actor bridges TCP I/O into the actor message loop.
 On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 
 Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
-`reload <name> <path-or-url>`, `send <name-or-id> <type> [payload]`,
-`call <name-or-id> <type> [payload]`, `stop <name-or-id>`,
+`reload <name> <path-or-url>`, `send <name-or-id> <type> [data|x:hex]`,
+`call <name-or-id> <type> [data|x:hex]`, `stop <name-or-id>`,
 `register <name>`, `lookup <name>`, `mount <host>[:<port>]`,
 `caps [target]`, `ai <prompt>`, `embed <text>`, `sql <query>`,
 `queue <message>`, `history [clear]`, `exit`
+
+The `send` and `call` commands accept an optional `x:` prefix on the payload to
+send hex-encoded binary data (e.g., `call led 4278190145 x:0000ff000000` sends
+6 raw bytes). This is essential for hardware actors that use binary struct
+payloads.
 
 Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
 get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
@@ -329,16 +335,65 @@ npx wrangler deploy
 npx wrangler secret put AUTH_TOKEN
 ```
 
+### Hardware actors
+
+Hardware peripherals are exposed as actors with binary struct payloads. Each
+actor follows the same HAL pattern: a private `*_hal.h` interface with a mock
+implementation for Linux testing and a real implementation for ESP32. All
+hardware actors register under `/node/hardware/` in the namespace.
+
+| Actor | Namespace path | ESP32 driver |
+|---|---|---|
+| GPIO | `/node/hardware/gpio` | `gpio_isr_handler` + edge filtering |
+| I2C | `/node/hardware/i2c` | Legacy `driver/i2c.h` master API |
+| PWM | `/node/hardware/pwm` | LEDC (low-speed mode, 6 channels) |
+| LED | `/node/hardware/led` | `led_strip` component (RMT, WS2812) |
+
+**GPIO** supports digital read/write, configurable input/output modes, and
+interrupt-driven event subscriptions. Pin state changes are delivered as
+`MSG_GPIO_EVENT` messages to subscribed actors.
+
+**I2C** provides master-mode bus access: write, read, write-then-read, and bus
+scan. All operations are synchronous request/response with binary struct
+payloads.
+
+**PWM** controls duty cycle on up to 6 channels. Configure a channel with pin,
+frequency, and resolution (8/10/12/14-bit), then set duty cycle.
+
+**LED** drives WS2812/NeoPixel addressable LED strips (up to 256 LEDs).
+Supports per-pixel color, bulk set, global brightness scaling, and explicit
+show/clear. `SET_PIXEL` does not auto-flush (batch-friendly); call `SHOW` to
+push pixels to hardware. `SET_ALL` and `CLEAR` auto-flush.
+
+**Shell example** -- control the onboard RGB LED on an ESP32-C6 from the
+interactive shell using hex-encoded binary payloads (`x:` prefix):
+
+```
+mk> call led 4278190144 x:08000100
+[reply] type=4278190156 from=12 size=0 ""
+mk> call led 4278190145 x:0000ff000000
+[reply] type=4278190156 from=12 size=0 ""
+mk> call led 4278190149
+[reply] type=4278190156 from=12 size=0 ""
+```
+
+The three calls above: (1) configure pin 8, 1 LED; (2) set pixel 0 to red
+(R=0xFF, G=0x00, B=0x00); (3) show (flush to hardware). Message types are
+decimal representations of `MSG_LED_CONFIGURE` (0xFF000040), `MSG_LED_SET_PIXEL`
+(0xFF000041), and `MSG_LED_SHOW` (0xFF000045). The `x:` prefix tells the shell
+to decode the hex string into a binary payload instead of sending it as text.
+
 ## Project structure
 
 ```
 include/microkernel/    Public headers (types, runtime, actor, message, services,
                         transport, http, mk_socket, supervision, wasm_actor,
-                        namespace, cf_proxy)
+                        namespace, cf_proxy, gpio, i2c, pwm, led)
 src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, hot reload, namespace,
-                        cf_proxy, local_kv, state_persist, wire format, utilities)
-tests/                  35 unit/integration tests + realworld tests + benchmarks
+                        cf_proxy, local_kv, state_persist, hardware actors,
+                        HAL interfaces + Linux mocks, wire format, utilities)
+tests/                  39 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (C and WAT)
 tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
@@ -353,7 +408,8 @@ docs/                   Architecture, API reference, examples, development guide
 
 **Optional:** OpenSSL (TLS on Linux), WAMR (WASM actors, default ON via submodule).
 
-**ESP32:** ESP-IDF v5.5+ (includes mbedTLS, lwIP, FreeRTOS).
+**ESP32:** ESP-IDF v5.5+ (includes mbedTLS, lwIP, FreeRTOS). The `led_strip`
+component is fetched automatically from the IDF component registry on first build.
 
 ## Documentation
 
