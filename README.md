@@ -13,6 +13,7 @@ scheduler with integrated I/O polling.
 - **Cross-node name registry** -- location-transparent `actor_send_named()` across nodes
 - **Hierarchical namespace** -- `/`-prefixed path table, mount points, cross-node path sync
 - **Dynamic node interconnection** -- `mount` protocol with hello handshake, automatic registry sync
+- **Cloudflare KV integration** -- cf_proxy actor bridges local actors to Cloudflare Workers via WSS; shell history persists across reboots
 - **Capability advertisement** -- nodes report platform, features, and resource counts on request
 - **Networking** -- TCP, UDP, DNS resolution via getaddrinfo
 - **HTTP client/server** -- GET, POST, chunked transfer, request routing, response building
@@ -22,7 +23,7 @@ scheduler with integrated I/O polling.
 - **Core services** -- timers (timerfd), FD watching, name registry, structured logging
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
-- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop actors, send messages, load `.wasm` from files or URLs
+- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop actors, send messages, load `.wasm` from files or URLs, persistent command history via Cloudflare KV
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, and interactive shell
 
 ## Building (Linux)
@@ -33,7 +34,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-31 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+32 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules. The WAMR submodule auto-initializes on first build.
 
@@ -265,7 +266,7 @@ On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
 `send <name-or-id> <type> [payload]`, `call <name-or-id> <type> [payload]`,
 `stop <name-or-id>`, `register <name>`, `lookup <name>`,
-`mount <host>[:<port>]`, `caps [target]`, `exit`
+`mount <host>[:<port>]`, `caps [target]`, `history [clear]`, `exit`
 
 Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
 get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
@@ -281,20 +282,50 @@ cargo build --target wasm32-unknown-unknown --release
 The same binary runs on both Linux and ESP32 -- a single 64KB WASM page via
 `.cargo/config.toml` (16KB stack, 32KB file buffer).
 
+### Cloudflare KV storage
+
+The `cf_proxy` actor maintains a persistent WSS connection to a Cloudflare Worker,
+giving every node transparent access to cloud key-value storage through the
+namespace path `/node/storage/kv`. Local actors send simple `key=...\nvalue=...`
+payloads; the proxy translates to JSON over WebSocket; the Worker handles
+server-side key prefixing by node identity.
+
+The shell's `history` command uses this to persist command history across reboots --
+the acceptance test for the integration. Configuration:
+
+```bash
+# Linux: environment variables
+MK_CF_URL="wss://your-worker.workers.dev/ws" MK_CF_TOKEN="secret" ./mk-shell
+
+# ESP32: create platforms/esp32/main/cf_config.h (gitignored)
+#define CF_PROXY_URL   "wss://your-worker.workers.dev/ws"
+#define CF_PROXY_TOKEN "secret"
+```
+
+Deploy the Worker:
+
+```bash
+cd platforms/cloudflare/worker
+npm install
+npx wrangler deploy
+npx wrangler secret put AUTH_TOKEN
+```
+
 ## Project structure
 
 ```
 include/microkernel/    Public headers (types, runtime, actor, message, services,
                         transport, http, mk_socket, supervision, wasm_actor,
-                        namespace)
+                        namespace, cf_proxy)
 src/                    Implementation (runtime, actors, transports, HTTP state
-                        machine, supervision, wasm_actor, namespace, wire format,
-                        utilities)
-tests/                  31 unit/integration tests + realworld tests + benchmarks
+                        machine, supervision, wasm_actor, namespace, cf_proxy,
+                        wire format, utilities)
+tests/                  32 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (echo.c)
 tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
 platforms/esp32/        ESP-IDF project (components: microkernel, microkernel_hal)
+platforms/cloudflare/   Cloudflare Worker (mk-proxy) for cloud KV storage
 docs/                   Architecture, API reference, examples, development guide
 ```
 
