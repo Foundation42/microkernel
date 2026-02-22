@@ -21,6 +21,7 @@ add_library(microkernel STATIC
     ns_actor.c
     node_identity.c
     caps_actor.c
+    cf_proxy.c
 )
 
 target_include_directories(microkernel PUBLIC

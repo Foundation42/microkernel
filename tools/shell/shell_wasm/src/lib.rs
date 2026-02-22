@@ -46,6 +46,7 @@ extern "C" {
         size_out: *mut u32,
     ) -> i32;
     fn mk_reverse_lookup(id: i64, buf: *mut u8, buf_size: i32) -> i32;
+    fn mk_time_ms() -> i64;
 }
 
 const ACTOR_ID_INVALID: i64 = 0;
@@ -59,6 +60,21 @@ const MSG_MOUNT_REQUEST: u32 = 105;
 const MSG_MOUNT_RESPONSE: u32 = 106;
 const MSG_CAPS_REQUEST: u32 = 0xFF00001D;
 const MSG_CAPS_REPLY: u32 = 0xFF00001E;
+
+// Cloudflare proxy message types
+const MSG_CF_KV_PUT: u32 = 300;
+const MSG_CF_KV_GET: u32 = 301;
+#[allow(dead_code)]
+const MSG_CF_KV_DELETE: u32 = 302;
+const MSG_CF_KV_LIST: u32 = 303;
+#[allow(dead_code)]
+const MSG_CF_OK: u32 = 310;
+const MSG_CF_VALUE: u32 = 311;
+const MSG_CF_KEYS: u32 = 313;
+#[allow(dead_code)]
+const MSG_CF_NOT_FOUND: u32 = 315;
+#[allow(dead_code)]
+const MSG_CF_ERROR: u32 = 316;
 
 // Buffer sizes
 const INPUT_BUF_SIZE: usize = 1024;
@@ -260,6 +276,7 @@ fn cmd_help() {
     print_str("  lookup <name>                     Lookup actor by name\n");
     print_str("  mount <host>[:<port>]             Connect to remote node (default port 4200)\n");
     print_str("  caps [target]                    Query node capabilities\n");
+    print_str("  history [clear]                   Show or clear command history\n");
     print_str("  whoami                            Show node identity and actor ID\n");
     print_str("  self                              Print own actor ID\n");
     print_str("  exit                              Shut down\n");
@@ -752,6 +769,207 @@ fn cmd_caps(arg: &[u8]) {
     }
 }
 
+/// Look up the cf_proxy actor via /node/storage/kv path.
+fn find_kv_proxy() -> i64 {
+    let path = b"/node/storage/kv";
+    unsafe { mk_lookup(path.as_ptr(), path.len() as i32) }
+}
+
+/// Record a command to history via Cloudflare KV (fire-and-forget).
+fn history_record(line: &[u8]) {
+    let kv = find_kv_proxy();
+    if kv == ACTOR_ID_INVALID { return; }
+
+    let ts = unsafe { mk_time_ms() };
+
+    // Build payload: key=history/{timestamp_hex}\nvalue={command}
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let mut off = 0usize;
+
+    let prefix = b"key=history/";
+    file_buf[off..off + prefix.len()].copy_from_slice(prefix);
+    off += prefix.len();
+
+    // Write timestamp as hex (16 chars, zero-padded)
+    let hex = b"0123456789abcdef";
+    for i in (0..16).rev() {
+        let nibble = ((ts as u64) >> (i * 4)) & 0xf;
+        file_buf[off] = hex[nibble as usize];
+        off += 1;
+    }
+
+    file_buf[off] = b'\n';
+    off += 1;
+    let val_prefix = b"value=";
+    file_buf[off..off + val_prefix.len()].copy_from_slice(val_prefix);
+    off += val_prefix.len();
+
+    let cmd_len = line.len().min(FILE_BUF_SIZE - off);
+    file_buf[off..off + cmd_len].copy_from_slice(&line[..cmd_len]);
+    off += cmd_len;
+
+    unsafe { mk_send(kv, MSG_CF_KV_PUT as i32, file_buf.as_ptr(), off as i32) };
+}
+
+fn cmd_history() {
+    let kv = find_kv_proxy();
+    if kv == ACTOR_ID_INVALID {
+        print_str("error: /node/storage/kv not available\n");
+        return;
+    }
+
+    // Send KV LIST for history/ prefix
+    let list_payload = b"prefix=history/\nlimit=20";
+    let rc = unsafe {
+        mk_send(kv, MSG_CF_KV_LIST as i32,
+                list_payload.as_ptr(), list_payload.len() as i32)
+    };
+    if rc == 0 {
+        print_str("error: send failed\n");
+        return;
+    }
+
+    // Wait for MSG_CF_KEYS reply
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let mut recv_type: u32 = 0;
+    let mut recv_size: u32 = 0;
+    let mut recv_source: i64 = 0;
+    let rc = unsafe {
+        mk_recv_timeout(
+            &mut recv_type, input_buf.as_mut_ptr(), input_buf.len() as i32,
+            &mut recv_size, &mut recv_source, 5000,
+        )
+    };
+
+    if rc == -2 { print_str("Timeout\n"); return; }
+    if rc < 0 { print_str("error: recv failed\n"); return; }
+    if recv_type == MSG_CF_NOT_FOUND || recv_size == 0 {
+        print_str("(no history)\n");
+        return;
+    }
+    if recv_type != MSG_CF_KEYS {
+        print_str("(no history)\n");
+        return;
+    }
+
+    // Parse key list (newline-separated) and fetch each value
+    let keys_len = core::cmp::min(recv_size as usize, input_buf.len());
+
+    // Copy keys to FILE_BUF so we can reuse INPUT_BUF for GET requests
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let copy_len = keys_len.min(FILE_BUF_SIZE);
+    file_buf[..copy_len].copy_from_slice(&input_buf[..copy_len]);
+
+    let mut pos = 0;
+    while pos < copy_len {
+        // Find end of this key
+        let mut end = pos;
+        while end < copy_len && file_buf[end] != b'\n' {
+            end += 1;
+        }
+        if end == pos { pos = end + 1; continue; }
+
+        let key = &file_buf[pos..end];
+
+        // Build GET payload: key={key}
+        let prefix = b"key=";
+        let total = prefix.len() + key.len();
+        if total <= input_buf.len() {
+            input_buf[..prefix.len()].copy_from_slice(prefix);
+            input_buf[prefix.len()..total].copy_from_slice(key);
+
+            let rc = unsafe {
+                mk_send(kv, MSG_CF_KV_GET as i32,
+                        input_buf.as_ptr(), total as i32)
+            };
+            if rc != 0 {
+                let mut gt: u32 = 0;
+                let mut gs: u32 = 0;
+                let mut gsrc: i64 = 0;
+                let rc = unsafe {
+                    mk_recv_timeout(
+                        &mut gt, input_buf.as_mut_ptr(), input_buf.len() as i32,
+                        &mut gs, &mut gsrc, 3000,
+                    )
+                };
+                if rc >= 0 && gt == MSG_CF_VALUE && gs > 0 {
+                    let vlen = core::cmp::min(gs as usize, input_buf.len());
+                    print_str("  ");
+                    print(&input_buf[..vlen]);
+                    print_str("\n");
+                }
+            }
+        }
+
+        pos = end + 1;
+    }
+}
+
+fn cmd_history_clear() {
+    let kv = find_kv_proxy();
+    if kv == ACTOR_ID_INVALID {
+        print_str("error: /node/storage/kv not available\n");
+        return;
+    }
+
+    // List all history keys
+    let list_payload = b"prefix=history/\nlimit=100";
+    let rc = unsafe {
+        mk_send(kv, MSG_CF_KV_LIST as i32,
+                list_payload.as_ptr(), list_payload.len() as i32)
+    };
+    if rc == 0 { print_str("error: send failed\n"); return; }
+
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let mut recv_type: u32 = 0;
+    let mut recv_size: u32 = 0;
+    let mut recv_source: i64 = 0;
+    let rc = unsafe {
+        mk_recv_timeout(
+            &mut recv_type, input_buf.as_mut_ptr(), input_buf.len() as i32,
+            &mut recv_size, &mut recv_source, 5000,
+        )
+    };
+
+    if rc == -2 { print_str("Timeout\n"); return; }
+    if rc < 0 { print_str("error: recv failed\n"); return; }
+    if recv_type != MSG_CF_KEYS || recv_size == 0 {
+        print_str("(no history to clear)\n");
+        return;
+    }
+
+    let keys_len = core::cmp::min(recv_size as usize, input_buf.len());
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let copy_len = keys_len.min(FILE_BUF_SIZE);
+    file_buf[..copy_len].copy_from_slice(&input_buf[..copy_len]);
+
+    let mut count = 0u32;
+    let mut pos = 0;
+    while pos < copy_len {
+        let mut end = pos;
+        while end < copy_len && file_buf[end] != b'\n' { end += 1; }
+        if end == pos { pos = end + 1; continue; }
+
+        let key = &file_buf[pos..end];
+        let prefix = b"key=";
+        let total = prefix.len() + key.len();
+        if total <= input_buf.len() {
+            input_buf[..prefix.len()].copy_from_slice(prefix);
+            input_buf[prefix.len()..total].copy_from_slice(key);
+            unsafe {
+                mk_send(kv, MSG_CF_KV_DELETE as i32,
+                        input_buf.as_ptr(), total as i32)
+            };
+            count += 1;
+        }
+        pos = end + 1;
+    }
+
+    print_str("Deleted ");
+    print_u64(count as u64);
+    print_str(" history entries\n");
+}
+
 fn dispatch_command(line: &[u8]) {
     let trimmed = trim(line);
     if trimmed.is_empty() {
@@ -790,6 +1008,12 @@ fn dispatch_command(line: &[u8]) {
         cmd_mount(arg);
     } else if cmd == b"caps" {
         cmd_caps(arg);
+    } else if cmd == b"history" {
+        if arg == b"clear" {
+            cmd_history_clear();
+        } else {
+            cmd_history();
+        }
     } else if cmd == b"exit" || cmd == b"quit" {
         // Handled by caller — won't reach here
     } else {
@@ -817,8 +1041,12 @@ pub extern "C" fn handle_message(
         let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
 
         // REPL loop: receive messages via mk_recv_full
+        let mut need_prompt = true;
         loop {
-            print_str("mk> ");
+            if need_prompt {
+                print_str("mk> ");
+            }
+            need_prompt = true;
 
             let mut recv_type: u32 = 0;
             let mut recv_size: u32 = 0;
@@ -843,14 +1071,18 @@ pub extern "C" fn handle_message(
             }
 
             if recv_type == MSG_MOUNT_RESPONSE {
-                // Mount response handled inline (cmd_mount uses mk_recv_timeout)
-                // If we get here, it's a stale response — just display it
                 continue;
             }
 
             if recv_type == MSG_CAPS_REPLY {
-                // Caps reply handled inline (cmd_caps uses mk_recv_timeout)
-                // If we get here, it's a stale response — just display it
+                continue;
+            }
+
+            // Silently discard fire-and-forget CF replies (from history_record)
+            if recv_type == MSG_CF_OK || recv_type == MSG_CF_ERROR
+                || recv_type == MSG_CF_VALUE || recv_type == MSG_CF_KEYS
+                || recv_type == MSG_CF_NOT_FOUND {
+                need_prompt = false;
                 continue;
             }
 
@@ -876,7 +1108,17 @@ pub extern "C" fn handle_message(
                 return 0;
             }
 
+            // Copy command before dispatch (commands like whoami overwrite INPUT_BUF)
+            let mut cmd_copy = [0u8; 256];
+            let cmd_len = trimmed.len().min(cmd_copy.len());
+            cmd_copy[..cmd_len].copy_from_slice(&trimmed[..cmd_len]);
+
             dispatch_command(trimmed);
+
+            // Record non-empty commands to history (fire-and-forget)
+            if cmd_len > 0 && !starts_with(&cmd_copy[..cmd_len], b"history") {
+                history_record(&cmd_copy[..cmd_len]);
+            }
         }
 
         return 0;

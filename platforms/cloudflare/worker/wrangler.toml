@@ -1,0 +1,7 @@
+name = "mk-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-12-01"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "782f25b244d14fa59d19242924fb6033"

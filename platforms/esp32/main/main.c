@@ -19,6 +19,7 @@
 #include "microkernel/services.h"
 #include "microkernel/wasm_actor.h"
 #include "microkernel/namespace.h"
+#include "microkernel/cf_proxy.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -31,6 +32,10 @@
 #include "microkernel/http.h"
 #include <lwip/sockets.h>
 #include "wifi_config.h"
+#endif
+
+#if __has_include("cf_config.h")
+#include "cf_config.h"
 #endif
 
 /* Embedded WASM binaries */
@@ -1851,6 +1856,19 @@ static void *shell_runner(void *arg) {
     ns_actor_init(rt);
     ns_mount_listen(rt, MK_MOUNT_PORT);
     caps_actor_init(rt);
+
+#ifdef CF_PROXY_URL
+    {
+        cf_proxy_config_t cf_cfg;
+        memset(&cf_cfg, 0, sizeof(cf_cfg));
+        strncpy(cf_cfg.url, CF_PROXY_URL, sizeof(cf_cfg.url) - 1);
+#ifdef CF_PROXY_TOKEN
+        strncpy(cf_cfg.token, CF_PROXY_TOKEN, sizeof(cf_cfg.token) - 1);
+#endif
+        cf_proxy_init(rt, &cf_cfg);
+        ESP_LOGI(TAG, "shell: cf_proxy started → %s", CF_PROXY_URL);
+    }
+#endif
 
     /* Spawn shell WASM actor from embedded binary */
     size_t shell_size = (size_t)(shell_wasm_end - shell_wasm_start);

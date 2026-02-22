@@ -3,3 +3,4 @@ sdkconfig
 sdkconfig.old
 .cache/
 main/wifi_config.h
+main/cf_config.h

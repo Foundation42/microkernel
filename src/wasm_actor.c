@@ -9,6 +9,11 @@
 #include "microkernel/namespace.h"
 #include "wasm_export.h"
 #include <unistd.h>
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#else
+#include <time.h>
+#endif
 
 /* WAMR internal: manage per-thread exec_env TLS.
    When a fiber yields mid-execution, the TLS still points to its exec_env.
@@ -395,6 +400,17 @@ static int32_t mk_ns_list_native(wasm_exec_env_t env,
     return 0;
 }
 
+static int64_t mk_time_ms_native(wasm_exec_env_t env) {
+    (void)env;
+#ifdef ESP_PLATFORM
+    return (int64_t)(esp_timer_get_time() / 1000);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
 /* WAMR's NativeSymbol uses void* for func_ptr; suppress pedantic warning */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
@@ -417,6 +433,7 @@ static NativeSymbol native_symbols[] = {
     { "mk_node_name", mk_node_name_native, "(*~)i",       NULL },
     { "mk_ns_list",   mk_ns_list_native,   "(*~*~*)i",    NULL },
     { "mk_reverse_lookup", mk_reverse_lookup_native, "(I*~)i", NULL },
+    { "mk_time_ms",   mk_time_ms_native,   "()I",         NULL },
 };
 #pragma GCC diagnostic pop
 

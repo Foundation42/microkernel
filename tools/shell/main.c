@@ -7,6 +7,7 @@
 #include "microkernel/services.h"
 #include "microkernel/wasm_actor.h"
 #include "microkernel/namespace.h"
+#include "microkernel/cf_proxy.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,6 +234,17 @@ int main(int argc, char *argv[]) {
     if (port_env && port_env[0]) mount_port = (uint16_t)atoi(port_env);
     ns_mount_listen(rt, mount_port);
     caps_actor_init(rt);
+
+    /* Start cf_proxy if MK_CF_URL is set */
+    const char *cf_url = getenv("MK_CF_URL");
+    const char *cf_token = getenv("MK_CF_TOKEN");
+    if (cf_url && cf_url[0]) {
+        cf_proxy_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        strncpy(cfg.url, cf_url, sizeof(cfg.url) - 1);
+        if (cf_token) strncpy(cfg.token, cf_token, sizeof(cfg.token) - 1);
+        cf_proxy_init(rt, &cfg);
+    }
 
     /* Spawn shell WASM actor from file */
     actor_id_t shell = actor_spawn_wasm_file(rt, wasm_path, 32,
