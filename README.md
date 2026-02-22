@@ -23,7 +23,8 @@ scheduler with integrated I/O polling.
 - **Core services** -- timers (timerfd), FD watching, name registry, structured logging
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
-- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop actors, send messages, load `.wasm` from files or URLs, persistent command history via Cloudflare KV
+- **Hot code reload** -- atomic WASM module swap preserving names, mailbox, and supervisor state; shell `reload` command
+- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop/reload actors, send messages, load `.wasm` from files or URLs, persistent command history via Cloudflare KV
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, and interactive shell
 
 ## Building (Linux)
@@ -34,9 +35,10 @@ cmake --build build
 ctest --test-dir build
 ```
 
-32 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+35 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
-modules. The WAMR submodule auto-initializes on first build.
+modules and optionally `wat2wasm` (from wabt) for zero-linear-memory WAT modules.
+The WAMR submodule auto-initializes on first build.
 
 ### CMake options
 
@@ -265,10 +267,11 @@ no allocator). A C console actor bridges TCP I/O into the actor message loop.
 On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 
 Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
-`send <name-or-id> <type> [payload]`, `call <name-or-id> <type> [payload]`,
-`stop <name-or-id>`, `register <name>`, `lookup <name>`,
-`mount <host>[:<port>]`, `caps [target]`, `ai <prompt>`, `embed <text>`,
-`sql <query>`, `queue <message>`, `history [clear]`, `exit`
+`reload <name> <path-or-url>`, `send <name-or-id> <type> [payload]`,
+`call <name-or-id> <type> [payload]`, `stop <name-or-id>`,
+`register <name>`, `lookup <name>`, `mount <host>[:<port>]`,
+`caps [target]`, `ai <prompt>`, `embed <text>`, `sql <query>`,
+`queue <message>`, `history [clear]`, `exit`
 
 Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
 get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
@@ -331,10 +334,10 @@ include/microkernel/    Public headers (types, runtime, actor, message, services
                         transport, http, mk_socket, supervision, wasm_actor,
                         namespace, cf_proxy)
 src/                    Implementation (runtime, actors, transports, HTTP state
-                        machine, supervision, wasm_actor, namespace, cf_proxy,
-                        wire format, utilities)
-tests/                  32 unit/integration tests + realworld tests + benchmarks
-tests/wasm_modules/     WASM test module source (echo.c)
+                        machine, supervision, wasm_actor, hot reload, namespace,
+                        cf_proxy, local_kv, state_persist, wire format, utilities)
+tests/                  35 unit/integration tests + realworld tests + benchmarks
+tests/wasm_modules/     WASM test module source (C and WAT)
 tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
 platforms/esp32/        ESP-IDF project (components: microkernel, microkernel_hal)
