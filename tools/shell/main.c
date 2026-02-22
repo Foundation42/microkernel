@@ -8,6 +8,7 @@
 #include "microkernel/wasm_actor.h"
 #include "microkernel/namespace.h"
 #include "microkernel/cf_proxy.h"
+#include "microkernel/local_kv.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,6 +235,14 @@ int main(int argc, char *argv[]) {
     if (port_env && port_env[0]) mount_port = (uint16_t)atoi(port_env);
     ns_mount_listen(rt, mount_port);
     caps_actor_init(rt);
+
+    /* Start local KV (claims /node/storage/kv before cf_proxy) */
+    {
+        local_kv_config_t kv_cfg;
+        memset(&kv_cfg, 0, sizeof(kv_cfg));
+        strncpy(kv_cfg.base_path, "/tmp/mk_kv", sizeof(kv_cfg.base_path) - 1);
+        local_kv_init(rt, &kv_cfg);
+    }
 
     /* Start cf_proxy if MK_CF_URL is set */
     const char *cf_url = getenv("MK_CF_URL");

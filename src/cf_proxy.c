@@ -6,6 +6,7 @@
 #include "microkernel/http.h"
 #include "microkernel/namespace.h"
 #include "json_util.h"
+#include "payload_util.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -58,33 +59,6 @@ typedef struct {
 } cf_proxy_state_t;
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
-
-/* Find a value for "key=value\n" in payload text */
-static size_t payload_get(const char *payload, size_t plen,
-                          const char *key, char *out, size_t cap) {
-    size_t klen = strlen(key);
-    const char *p = payload;
-    const char *end = payload + plen;
-
-    while (p < end) {
-        if ((size_t)(end - p) > klen &&
-            memcmp(p, key, klen) == 0 && p[klen] == '=') {
-            const char *vstart = p + klen + 1;
-            const char *vend = vstart;
-            while (vend < end && *vend != '\n') vend++;
-            size_t vlen = (size_t)(vend - vstart);
-            size_t copy = vlen < cap - 1 ? vlen : cap - 1;
-            memcpy(out, vstart, copy);
-            out[copy] = '\0';
-            return copy;
-        }
-        /* skip to next line */
-        while (p < end && *p != '\n') p++;
-        if (p < end) p++;
-    }
-    out[0] = '\0';
-    return 0;
-}
 
 /* Allocate a pending slot. Returns index or -1 if full. */
 static int pending_alloc(cf_proxy_state_t *s, actor_id_t requester,

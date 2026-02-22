@@ -20,6 +20,7 @@
 #include "microkernel/wasm_actor.h"
 #include "microkernel/namespace.h"
 #include "microkernel/cf_proxy.h"
+#include "microkernel/local_kv.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1856,6 +1857,15 @@ static void *shell_runner(void *arg) {
     ns_actor_init(rt);
     ns_mount_listen(rt, MK_MOUNT_PORT);
     caps_actor_init(rt);
+
+    /* Start local KV (claims /node/storage/kv before cf_proxy) */
+    {
+        local_kv_config_t kv_cfg;
+        memset(&kv_cfg, 0, sizeof(kv_cfg));
+        strncpy(kv_cfg.base_path, "/storage", sizeof(kv_cfg.base_path) - 1);
+        local_kv_init(rt, &kv_cfg);
+        ESP_LOGI(TAG, "shell: local_kv started (base=/storage)");
+    }
 
 #ifdef CF_PROXY_URL
     {
