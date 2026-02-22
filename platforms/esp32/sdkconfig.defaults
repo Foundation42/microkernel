@@ -26,3 +26,27 @@ CONFIG_WAMR_ENABLE_LIB_PTHREAD=n
 
 # SPIFFS filename length: 64 chars for local KV encoded keys
 CONFIG_SPIFFS_OBJ_NAME_LEN=64
+
+# ── Size optimizations ────────────────────────────────────────────────
+# Compile for size instead of debug (-Os vs -Og).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE=y
+
+# Strip DEBUG/VERBOSE log strings from binary at compile time.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+
+# Disable IPv6 — saves ~20-40 KB flash + RAM.
+# CONFIG_LWIP_IPV6 is not set
+
+# Moderate WiFi buffer reduction — frees heap RAM for WAMR.
+# Defaults: 10 static RX, 32 dynamic RX.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+
+# Disable mDNS queries in LwIP DNS resolver.
+# CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES is not set
+
+# Use common CA bundle instead of full (~70 KB savings).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
