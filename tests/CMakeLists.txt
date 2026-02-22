@@ -54,11 +54,26 @@ if(HAVE_WASM)
                     ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/echo.c
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/echo.c
             COMMENT "Compiling echo.wasm")
-        add_custom_target(wasm_test_modules ALL DEPENDS ${WASM_OUT_DIR}/echo.wasm)
+        add_custom_command(
+            OUTPUT ${WASM_OUT_DIR}/stateful.wasm
+            COMMAND ${WASM_CC} --target=wasm32-unknown-unknown -nostdlib -O2
+                    -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined
+                    -o ${WASM_OUT_DIR}/stateful.wasm
+                    ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/stateful.c
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wasm_modules/stateful.c
+            COMMENT "Compiling stateful.wasm")
+        add_custom_target(wasm_test_modules ALL DEPENDS
+            ${WASM_OUT_DIR}/echo.wasm
+            ${WASM_OUT_DIR}/stateful.wasm)
 
         add_microkernel_test(test_wasm_actor)
         add_dependencies(test_wasm_actor wasm_test_modules)
         target_compile_definitions(test_wasm_actor PRIVATE
+            WASM_MODULE_DIR="${WASM_OUT_DIR}")
+
+        add_microkernel_test(test_state_persist)
+        add_dependencies(test_state_persist wasm_test_modules)
+        target_compile_definitions(test_state_persist PRIVATE
             WASM_MODULE_DIR="${WASM_OUT_DIR}")
     else()
         message(STATUS "WASM test: skipped (clang not found)")

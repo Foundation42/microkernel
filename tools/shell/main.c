@@ -9,6 +9,7 @@
 #include "microkernel/namespace.h"
 #include "microkernel/cf_proxy.h"
 #include "microkernel/local_kv.h"
+#include "microkernel/state_persist.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -235,6 +236,9 @@ int main(int argc, char *argv[]) {
     if (port_env && port_env[0]) mount_port = (uint16_t)atoi(port_env);
     ns_mount_listen(rt, mount_port);
     caps_actor_init(rt);
+
+    /* State persistence */
+    state_persist_init(rt, "/tmp/mk_state");
 
     /* Start local KV (claims /node/storage/kv before cf_proxy) */
     {

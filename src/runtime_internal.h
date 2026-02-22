@@ -173,4 +173,8 @@ node_id_t runtime_get_node_id(runtime_t *rt);
 bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id);
 void name_registry_remove_by_name(runtime_t *rt, const char *name);
 
+/* Phase 19: State persistence */
+const char *runtime_get_state_path(runtime_t *rt);
+void        runtime_set_state_path(runtime_t *rt, const char *path);
+
 #endif /* RUNTIME_INTERNAL_H */

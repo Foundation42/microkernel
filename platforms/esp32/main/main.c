@@ -21,6 +21,7 @@
 #include "microkernel/namespace.h"
 #include "microkernel/cf_proxy.h"
 #include "microkernel/local_kv.h"
+#include "microkernel/state_persist.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1857,6 +1858,9 @@ static void *shell_runner(void *arg) {
     ns_actor_init(rt);
     ns_mount_listen(rt, MK_MOUNT_PORT);
     caps_actor_init(rt);
+
+    /* State persistence */
+    state_persist_init(rt, "/storage/_state");
 
     /* Start local KV (claims /node/storage/kv before cf_proxy) */
     {

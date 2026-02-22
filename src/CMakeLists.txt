@@ -23,6 +23,7 @@ add_library(microkernel STATIC
     caps_actor.c
     cf_proxy.c
     local_kv.c
+    state_persist.c
 )
 
 target_include_directories(microkernel PUBLIC

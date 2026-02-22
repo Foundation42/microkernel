@@ -84,6 +84,8 @@ struct runtime {
     http_listener_t  http_listeners[MAX_HTTP_LISTENERS];
     /* Phase 15: namespace actor state (direct access) */
     void            *ns_state;
+    /* Phase 19: state persistence base path */
+    char             state_base_path[64];
 };
 
 /* ── Initialization / teardown ──────────────────────────────────────── */
@@ -907,4 +909,19 @@ void *runtime_get_actor_state(runtime_t *rt, actor_id_t id) {
     if (seq == 0 || seq >= rt->max_actors) return NULL;
     actor_t *a = rt->actors[seq];
     return a ? a->state : NULL;
+}
+
+/* ── State persistence accessors ───────────────────────────────────── */
+
+const char *runtime_get_state_path(runtime_t *rt) {
+    return rt->state_base_path[0] ? rt->state_base_path : NULL;
+}
+
+void runtime_set_state_path(runtime_t *rt, const char *path) {
+    if (path) {
+        strncpy(rt->state_base_path, path, sizeof(rt->state_base_path) - 1);
+        rt->state_base_path[sizeof(rt->state_base_path) - 1] = '\0';
+    } else {
+        rt->state_base_path[0] = '\0';
+    }
 }

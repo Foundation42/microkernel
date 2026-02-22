@@ -7,6 +7,7 @@
 #include "microkernel/services.h"
 #include "microkernel/http.h"
 #include "microkernel/namespace.h"
+#include "microkernel/state_persist.h"
 #include "wasm_export.h"
 #include <unistd.h>
 #ifdef ESP_PLATFORM
@@ -369,6 +370,30 @@ static int32_t mk_http_get_native(wasm_exec_env_t env, uint8_t *url,
     }
 }
 
+/* ── State persistence host functions ──────────────────────────────── */
+
+static int32_t mk_save_state_native(wasm_exec_env_t env, uint8_t *key,
+                                      int32_t key_len, uint8_t *data,
+                                      int32_t data_len) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    char key_str[64];
+    int n = key_len < 63 ? key_len : 63;
+    memcpy(key_str, key, n);
+    key_str[n] = '\0';
+    return state_save(s->rt, NULL, key_str, data, (size_t)data_len);
+}
+
+static int32_t mk_load_state_native(wasm_exec_env_t env, uint8_t *key,
+                                      int32_t key_len, uint8_t *buf,
+                                      int32_t buf_cap) {
+    wasm_actor_state_t *s = wasm_runtime_get_user_data(env);
+    char key_str[64];
+    int n = key_len < 63 ? key_len : 63;
+    memcpy(key_str, key, n);
+    key_str[n] = '\0';
+    return state_load(s->rt, NULL, key_str, buf, (size_t)buf_cap);
+}
+
 static int32_t mk_node_name_native(wasm_exec_env_t env,
                                      uint8_t *buf, int32_t buf_size) {
     (void)env;
@@ -434,6 +459,8 @@ static NativeSymbol native_symbols[] = {
     { "mk_ns_list",   mk_ns_list_native,   "(*~*~*)i",    NULL },
     { "mk_reverse_lookup", mk_reverse_lookup_native, "(I*~)i", NULL },
     { "mk_time_ms",   mk_time_ms_native,   "()I",         NULL },
+    { "mk_save_state", mk_save_state_native, "(*~*~)i",   NULL },
+    { "mk_load_state", mk_load_state_native, "(*~*~)i",   NULL },
 };
 #pragma GCC diagnostic pop
 
