@@ -29,7 +29,6 @@ bool led_hal_configure(int pin, int num_leds) {
         .strip_gpio_num = pin,
         .max_leds = num_leds,
         .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
         .flags.invert_out = false,
     };
     led_strip_rmt_config_t rmt_cfg = {

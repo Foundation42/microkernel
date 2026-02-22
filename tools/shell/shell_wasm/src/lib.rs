@@ -145,6 +145,37 @@ fn starts_with(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.len() >= needle.len() && &haystack[..needle.len()] == needle
 }
 
+/// Decode a hex nibble. Returns 0xFF on invalid input.
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0xFF,
+    }
+}
+
+/// Decode hex string into buf. Returns number of bytes decoded, or 0 on error.
+/// Input: pairs of hex digits, e.g. "08000100" -> [0x08, 0x00, 0x01, 0x00]
+fn decode_hex(hex: &[u8], buf: &mut [u8]) -> usize {
+    if hex.len() % 2 != 0 {
+        return 0;
+    }
+    let n = hex.len() / 2;
+    if n > buf.len() {
+        return 0;
+    }
+    for i in 0..n {
+        let hi = hex_nibble(hex[i * 2]);
+        let lo = hex_nibble(hex[i * 2 + 1]);
+        if hi == 0xFF || lo == 0xFF {
+            return 0;
+        }
+        buf[i] = (hi << 4) | lo;
+    }
+    n
+}
+
 fn parse_u64(s: &[u8]) -> Option<u64> {
     if s.is_empty() {
         return None;
@@ -282,8 +313,8 @@ fn cmd_help() {
     print_str("  ls /prefix                        List namespace entries by prefix\n");
     print_str("  load <path-or-url>                Load WASM actor from file or URL\n");
     print_str("  reload <name> <path-or-url>       Hot-reload WASM actor in-place\n");
-    print_str("  send <name-or-id> <type> [data]   Send message to actor\n");
-    print_str("  call <name-or-id> <type> [data]   Send and wait for reply (5s)\n");
+    print_str("  send <target> <type> [data|x:hex]  Send message to actor\n");
+    print_str("  call <target> <type> [data|x:hex]  Send and wait for reply (5s)\n");
     print_str("  stop <name-or-id>                 Stop an actor\n");
     print_str("  register <name>                   Register self by name\n");
     print_str("  lookup <name>                     Lookup actor by name\n");
@@ -620,11 +651,21 @@ fn cmd_send(arg: &[u8]) {
         }
     };
 
-    let rc = if payload.is_empty() {
-        unsafe { mk_send(dest, msg_type, core::ptr::null(), 0) }
+    let mut hex_buf = [0u8; 128];
+    let (payload_ptr, payload_len) = if payload.is_empty() {
+        (core::ptr::null(), 0)
+    } else if starts_with(payload, b"x:") {
+        let n = decode_hex(&payload[2..], &mut hex_buf);
+        if n == 0 {
+            print_str("error: invalid hex (use pairs, e.g. x:08000100)\n");
+            return;
+        }
+        (hex_buf.as_ptr(), n as i32)
     } else {
-        unsafe { mk_send(dest, msg_type, payload.as_ptr(), payload.len() as i32) }
+        (payload.as_ptr(), payload.len() as i32)
     };
+
+    let rc = unsafe { mk_send(dest, msg_type, payload_ptr, payload_len) };
 
     if rc != 0 {
         print_str("Sent type=");
@@ -666,12 +707,22 @@ fn cmd_call(arg: &[u8]) {
         }
     };
 
-    // Send
-    let rc = if payload.is_empty() {
-        unsafe { mk_send(dest, msg_type, core::ptr::null(), 0) }
+    // Send (with hex payload support)
+    let mut hex_buf = [0u8; 128];
+    let (payload_ptr, payload_len) = if payload.is_empty() {
+        (core::ptr::null(), 0)
+    } else if starts_with(payload, b"x:") {
+        let n = decode_hex(&payload[2..], &mut hex_buf);
+        if n == 0 {
+            print_str("error: invalid hex (use pairs, e.g. x:08000100)\n");
+            return;
+        }
+        (hex_buf.as_ptr(), n as i32)
     } else {
-        unsafe { mk_send(dest, msg_type, payload.as_ptr(), payload.len() as i32) }
+        (payload.as_ptr(), payload.len() as i32)
     };
+
+    let rc = unsafe { mk_send(dest, msg_type, payload_ptr, payload_len) };
     if rc == 0 {
         print_str("error: send failed\n");
         return;
