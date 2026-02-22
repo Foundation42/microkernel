@@ -46,11 +46,23 @@
 #define MSG_GPIO_READ         ((msg_type_t)0xFF000022)
 #define MSG_GPIO_SUBSCRIBE    ((msg_type_t)0xFF000023)
 #define MSG_GPIO_UNSUBSCRIBE  ((msg_type_t)0xFF000024)
-/* 0xFF000025–0xFF000027 reserved for PWM/ADC/I2C */
+/* 0xFF000025–0xFF000027 reserved for PWM/ADC */
 #define MSG_GPIO_OK           ((msg_type_t)0xFF000028)
 #define MSG_GPIO_VALUE        ((msg_type_t)0xFF000029)
 #define MSG_GPIO_ERROR        ((msg_type_t)0xFF00002A)
 #define MSG_GPIO_EVENT        ((msg_type_t)0xFF00002B)
+
+/* Phase 22: I2C actor */
+#define MSG_I2C_CONFIGURE     ((msg_type_t)0xFF000030)
+#define MSG_I2C_WRITE         ((msg_type_t)0xFF000031)
+#define MSG_I2C_READ          ((msg_type_t)0xFF000032)
+#define MSG_I2C_WRITE_READ    ((msg_type_t)0xFF000033)
+#define MSG_I2C_SCAN          ((msg_type_t)0xFF000034)
+/* 0xFF000035–0xFF000037 reserved for I2C extensions */
+#define MSG_I2C_OK            ((msg_type_t)0xFF000038)
+#define MSG_I2C_DATA          ((msg_type_t)0xFF000039)
+#define MSG_I2C_ERROR         ((msg_type_t)0xFF00003A)
+#define MSG_I2C_SCAN_RESULT   ((msg_type_t)0xFF00003B)
 
 /* ── Timer payload ─────────────────────────────────────────────────── */
 

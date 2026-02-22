@@ -24,6 +24,7 @@
 #include "microkernel/local_kv.h"
 #include "microkernel/state_persist.h"
 #include "microkernel/gpio.h"
+#include "microkernel/i2c.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1932,6 +1933,16 @@ static void *shell_runner(void *arg) {
                      (uint64_t)gpio_id);
         else
             ESP_LOGW(TAG, "shell: gpio actor init failed");
+    }
+
+    /* Start I2C actor */
+    {
+        actor_id_t i2c_id = i2c_actor_init(rt);
+        if (i2c_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: i2c actor started (id=%" PRIu64 ")",
+                     (uint64_t)i2c_id);
+        else
+            ESP_LOGW(TAG, "shell: i2c actor init failed");
     }
 
 #ifdef CF_PROXY_URL

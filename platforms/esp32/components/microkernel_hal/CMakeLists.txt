@@ -12,6 +12,7 @@ idf_component_register(
         "timer_esp32.c"
         "mk_socket_tls_esp.c"
         "gpio_esp32.c"
+        "i2c_esp32.c"
         ${FIBER_SRCS}
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS

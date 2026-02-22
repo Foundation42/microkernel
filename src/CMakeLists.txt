@@ -26,6 +26,8 @@ add_library(microkernel STATIC
     state_persist.c
     gpio_actor.c
     gpio_hal_linux.c
+    i2c_actor.c
+    i2c_hal_linux.c
 )
 
 target_include_directories(microkernel PUBLIC
