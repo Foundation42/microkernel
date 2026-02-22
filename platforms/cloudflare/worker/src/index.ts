@@ -1,14 +1,18 @@
 /**
- * mk-proxy: Cloudflare Worker for microkernel cloud storage.
+ * mk-proxy: Cloudflare Worker for microkernel cloud services.
  *
  * Accepts WebSocket connections at /ws, authenticates with a pre-shared
- * token, then proxies KV operations with server-side key prefixing.
+ * token, then proxies KV, D1, Queue, and AI operations with server-side
+ * key prefixing.
  *
  * Wire protocol: newline-delimited JSON over WebSocket.
  */
 
 interface Env {
   KV: KVNamespace;
+  DB: D1Database;
+  QUEUE?: Queue;   /* optional — uncomment in wrangler.toml after creating */
+  AI: Ai;
   AUTH_TOKEN: string;
 }
 
@@ -72,6 +76,82 @@ async function kvList(
   return JSON.stringify({ req_id: reqId, type: "keys", keys });
 }
 
+/* ── D1 operations ────────────────────────────────────────────────── */
+
+async function dbQuery(
+  env: Env, session: Session, reqId: number,
+  sql: string, params: string[]
+): Promise<string> {
+  const stmt = env.DB.prepare(sql).bind(...params);
+  const result = await stmt.all();
+  return JSON.stringify({
+    req_id: reqId, type: "db_query_ok", rows: result.results
+  });
+}
+
+async function dbExec(
+  env: Env, session: Session, reqId: number,
+  sql: string, params: string[]
+): Promise<string> {
+  const stmt = env.DB.prepare(sql).bind(...params);
+  const result = await stmt.run();
+  return JSON.stringify({
+    req_id: reqId, type: "db_exec_ok",
+    rows_affected: result.meta.changes
+  });
+}
+
+/* ── Queue operations ─────────────────────────────────────────────── */
+
+async function queuePush(
+  env: Env, session: Session, reqId: number,
+  body: string, delaySeconds: number
+): Promise<string> {
+  if (!env.QUEUE) {
+    return JSON.stringify({
+      req_id: reqId, type: "error",
+      message: "queue not configured"
+    });
+  }
+  const message = {
+    node_id: session.nodeId,
+    body,
+    ts: new Date().toISOString(),
+  };
+  await env.QUEUE.send(message, {
+    delaySeconds: delaySeconds > 0 ? delaySeconds : undefined
+  } as any);
+  return JSON.stringify({ req_id: reqId, type: "queue_push_ok" });
+}
+
+/* ── AI operations ────────────────────────────────────────────────── */
+
+async function aiInfer(
+  env: Env, reqId: number,
+  model: string, prompt: string
+): Promise<string> {
+  const result = await env.AI.run(
+    model || "@cf/meta/llama-3.1-8b-instruct",
+    { prompt }
+  ) as any;
+  return JSON.stringify({
+    req_id: reqId, type: "ai_infer_ok", result: result.response
+  });
+}
+
+async function aiEmbed(
+  env: Env, reqId: number,
+  model: string, text: string
+): Promise<string> {
+  const result = await env.AI.run(
+    model || "@cf/baai/bge-small-en-v1.5",
+    { text: [text] }
+  ) as any;
+  return JSON.stringify({
+    req_id: reqId, type: "ai_embed_ok", embedding: result.data[0]
+  });
+}
+
 /* ── Message handler ──────────────────────────────────────────────── */
 
 async function handleMessage(
@@ -111,6 +191,7 @@ async function handleMessage(
 
   try {
     switch (msgType) {
+      /* KV */
       case "kv_get":
         return await kvGet(env, session, reqId, msg.key as string);
 
@@ -129,6 +210,40 @@ async function handleMessage(
           env, session, reqId,
           (msg.prefix as string) || "",
           (msg.limit as number) || 100
+        );
+
+      /* D1 */
+      case "db_query":
+        return await dbQuery(
+          env, session, reqId,
+          msg.sql as string, (msg.params as string[]) || []
+        );
+
+      case "db_exec":
+        return await dbExec(
+          env, session, reqId,
+          msg.sql as string, (msg.params as string[]) || []
+        );
+
+      /* Queue */
+      case "queue_push":
+        return await queuePush(
+          env, session, reqId,
+          msg.body as string,
+          (msg.delay_seconds as number) || 0
+        );
+
+      /* AI */
+      case "ai_infer":
+        return await aiInfer(
+          env, reqId,
+          msg.model as string, msg.prompt as string
+        );
+
+      case "ai_embed":
+        return await aiEmbed(
+          env, reqId,
+          msg.model as string, msg.text as string
         );
 
       default:

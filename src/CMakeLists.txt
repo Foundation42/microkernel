@@ -32,6 +32,11 @@ target_include_directories(microkernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+option(CF_PROXY_DEBUG "Enable cf_proxy debug logging" OFF)
+if(CF_PROXY_DEBUG)
+    target_compile_definitions(microkernel PRIVATE CF_PROXY_DEBUG=1)
+endif()
+
 find_package(Threads REQUIRED)
 target_link_libraries(microkernel PUBLIC Threads::Threads)
 

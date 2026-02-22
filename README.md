@@ -13,12 +13,12 @@ scheduler with integrated I/O polling.
 - **Cross-node name registry** -- location-transparent `actor_send_named()` across nodes
 - **Hierarchical namespace** -- `/`-prefixed path table, mount points, cross-node path sync
 - **Dynamic node interconnection** -- `mount` protocol with hello handshake, automatic registry sync
-- **Cloudflare KV integration** -- cf_proxy actor bridges local actors to Cloudflare Workers via WSS; shell history persists across reboots
+- **Cloudflare integration** -- cf_proxy actor bridges local actors to Cloudflare Workers via WSS: KV storage, D1 SQL database, AI inference/embeddings, queue push; shell history persists across reboots
 - **Capability advertisement** -- nodes report platform, features, and resource counts on request
 - **Networking** -- TCP, UDP, DNS resolution via getaddrinfo
 - **HTTP client/server** -- GET, POST, chunked transfer, request routing, response building
 - **SSE client/server** -- event stream parsing and server push
-- **WebSocket client/server** -- text/binary frames, ping/pong, upgrade handling
+- **WebSocket client/server** -- text/binary frames, ping/pong, upgrade handling, large frames up to 64KB with dynamic allocation
 - **TLS** -- OpenSSL on Linux, mbedTLS on ESP32
 - **Core services** -- timers (timerfd), FD watching, name registry, structured logging
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
@@ -43,6 +43,7 @@ modules. The WAMR submodule auto-initializes on first build.
 | Option | Default | Description |
 |---|---|---|
 | `ENABLE_WASM` | ON | WASM actor runtime via WAMR |
+| `CF_PROXY_DEBUG` | OFF | Verbose cf_proxy and WebSocket frame logging |
 | `BUILD_REALWORLD_TESTS` | OFF | Tests that hit the public network |
 | `BUILD_BENCHMARKS` | OFF | HTTP and actor throughput benchmarks |
 
@@ -241,6 +242,7 @@ after WiFi connects:
 ```
 $ nc 192.168.1.135 23
 ╔════════════════════════════════════╗
+║  Entrained OS                      ║
 ║  microkernel WASM shell v0.2       ║
 ║  Type 'help' for commands          ║
 ╚════════════════════════════════════╝
@@ -250,9 +252,8 @@ Loading...
 Spawned actor 4294967299 as 'echo'
 mk> call echo 200 hello
 [reply] type=201 from=4294967299 size=5 "hello"
-mk> send echo 200 world
-Sent type=200 to actor 4294967299
-[msg] type=201 from=4294967299 size=5 "world"
+mk> ai Explain the actor model in one sentence
+The actor model is a concurrent computing approach where process...
 mk> stop echo
 Stopped actor 4294967299
 mk> exit
@@ -266,7 +267,8 @@ On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
 Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
 `send <name-or-id> <type> [payload]`, `call <name-or-id> <type> [payload]`,
 `stop <name-or-id>`, `register <name>`, `lookup <name>`,
-`mount <host>[:<port>]`, `caps [target]`, `history [clear]`, `exit`
+`mount <host>[:<port>]`, `caps [target]`, `ai <prompt>`, `embed <text>`,
+`sql <query>`, `queue <message>`, `history [clear]`, `exit`
 
 Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
 get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
@@ -282,16 +284,27 @@ cargo build --target wasm32-unknown-unknown --release
 The same binary runs on both Linux and ESP32 -- a single 64KB WASM page via
 `.cargo/config.toml` (16KB stack, 32KB file buffer).
 
-### Cloudflare KV storage
+### Cloudflare cloud services
 
 The `cf_proxy` actor maintains a persistent WSS connection to a Cloudflare Worker,
-giving every node transparent access to cloud key-value storage through the
-namespace path `/node/storage/kv`. Local actors send simple `key=...\nvalue=...`
-payloads; the proxy translates to JSON over WebSocket; the Worker handles
-server-side key prefixing by node identity.
+giving every node transparent access to cloud services through virtual namespace
+paths. Local actors send simple `key=value\n` payloads; the proxy translates to
+JSON over WebSocket; the Worker handles server-side key prefixing by node identity.
 
-The shell's `history` command uses this to persist command history across reboots --
-the acceptance test for the integration. Configuration:
+| Service | Virtual path | Cloudflare binding |
+|---|---|---|
+| Key-value store | `/node/storage/kv` | Workers KV |
+| SQL database | `/node/storage/db` | D1 |
+| Message queue | `/node/queue/default` | Queues |
+| Text inference | `/node/ai/infer` | Workers AI |
+| Embeddings | `/node/ai/embed` | Workers AI |
+
+Cloudflare is the guaranteed floor -- always reachable. Virtual paths resolve to
+the best available implementation: local flash/RAM > mounted peer > Cloudflare.
+Actors address services by name, never by backend.
+
+The shell's `history` command uses KV storage to persist command history across
+reboots -- the acceptance test for the integration. Configuration:
 
 ```bash
 # Linux: environment variables
@@ -325,7 +338,7 @@ tests/wasm_modules/     WASM test module source (echo.c)
 tools/shell/            Interactive shell (C driver + Rust WASM REPL)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
 platforms/esp32/        ESP-IDF project (components: microkernel, microkernel_hal)
-platforms/cloudflare/   Cloudflare Worker (mk-proxy) for cloud KV storage
+platforms/cloudflare/   Cloudflare Worker (mk-proxy) for cloud KV, D1, AI
 docs/                   Architecture, API reference, examples, development guide
 ```
 

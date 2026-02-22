@@ -147,17 +147,18 @@ static void ws_send_text(int fd, const char *text) {
 
 /* ── Mock server ──────────────────────────────────────────────────── */
 
-static void mock_handle_kv(int fd, const char *json) {
+static void mock_handle_message(int fd, const char *json) {
     char type[32] = "";
     json_get_str(json, "type", type, sizeof(type));
     int64_t req_id = json_get_int(json, "req_id", -1);
 
-    char resp[1024];
+    char resp[2048];
     json_buf_t j;
     json_init(&j, resp, sizeof(resp));
     json_obj_open(&j);
     json_int(&j, "req_id", req_id);
 
+    /* KV operations */
     if (strcmp(type, "kv_put") == 0) {
         json_str(&j, "type", "ok");
     } else if (strcmp(type, "kv_get") == 0) {
@@ -182,7 +183,44 @@ static void mock_handle_kv(int fd, const char *json) {
             j.off += alen;
             resp[j.off] = '\0';
         }
-    } else {
+    }
+    /* D1 operations */
+    else if (strcmp(type, "db_query") == 0) {
+        json_str(&j, "type", "db_query_ok");
+        /* Return mock rows as inline JSON array */
+        size_t off = json_len(&j);
+        const char *arr = ",\"rows\":[{\"id\":1,\"msg\":\"boot\"},{\"id\":2,\"msg\":\"ping\"}]";
+        size_t alen = strlen(arr);
+        if (off + alen < sizeof(resp)) {
+            memcpy(resp + off, arr, alen);
+            j.off += alen;
+            resp[j.off] = '\0';
+        }
+    } else if (strcmp(type, "db_exec") == 0) {
+        json_str(&j, "type", "db_exec_ok");
+        json_int(&j, "rows_affected", 1);
+    }
+    /* Queue operations */
+    else if (strcmp(type, "queue_push") == 0) {
+        json_str(&j, "type", "queue_push_ok");
+    }
+    /* AI operations */
+    else if (strcmp(type, "ai_infer") == 0) {
+        json_str(&j, "type", "ai_infer_ok");
+        json_str(&j, "result", "The actor model uses message passing.");
+    } else if (strcmp(type, "ai_embed") == 0) {
+        json_str(&j, "type", "ai_embed_ok");
+        /* Return mock embedding as inline JSON array */
+        size_t off = json_len(&j);
+        const char *arr = ",\"embedding\":[0.1,-0.2,0.3]";
+        size_t alen = strlen(arr);
+        if (off + alen < sizeof(resp)) {
+            memcpy(resp + off, arr, alen);
+            j.off += alen;
+            resp[j.off] = '\0';
+        }
+    }
+    else {
         json_str(&j, "type", "error");
         json_str(&j, "message", "unknown op");
     }
@@ -240,7 +278,7 @@ static pid_t start_mock_server(int n_ops) {
         if (n <= 0) break;
         buf[n] = '\0';
         if (opcode == 0x1)
-            mock_handle_kv(cfd, (const char *)buf);
+            mock_handle_message(cfd, (const char *)buf);
         else if (opcode == 0x8)
             break;
     }
@@ -379,6 +417,77 @@ done:
     s->done = true;
     runtime_stop(rt);
     return false;
+}
+
+/* ── Service tester actor: runs a single service op ───────────────── */
+
+typedef struct {
+    actor_id_t cf_id;
+    msg_type_t send_type;     /* what to send to cf_proxy */
+    const char *payload;      /* payload to send */
+    bool       done;
+    msg_type_t reply_type;    /* received reply type */
+    char       reply[1024];   /* received reply payload */
+    size_t     reply_size;
+} svc_tester_state_t;
+
+static bool svc_tester_behavior(runtime_t *rt, actor_t *self,
+                                 message_t *msg, void *state) {
+    (void)self;
+    svc_tester_state_t *s = state;
+
+    /* Trigger (type=1): set 500ms timer for WS to connect+auth */
+    if (msg->type == 1) {
+        actor_set_timer(rt, 500, false);
+        return true;
+    }
+
+    /* Timer: send the request */
+    if (msg->type == MSG_TIMER) {
+        actor_send(rt, s->cf_id, s->send_type,
+                   s->payload, strlen(s->payload));
+        return true;
+    }
+
+    /* Any CF reply → capture and stop */
+    if (msg->type >= 310 && msg->type <= 316) {
+        s->reply_type = msg->type;
+        if (msg->payload_size > 0) {
+            size_t copy = msg->payload_size < sizeof(s->reply) - 1
+                         ? msg->payload_size : sizeof(s->reply) - 1;
+            memcpy(s->reply, msg->payload, copy);
+            s->reply[copy] = '\0';
+            s->reply_size = copy;
+        }
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+/* Helper: run a single service request test */
+static void run_svc_test(svc_tester_state_t *ts) {
+    pid_t server = start_mock_server(2);
+
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+
+    cf_proxy_config_t config;
+    memset(&config, 0, sizeof(config));
+    snprintf(config.url, sizeof(config.url),
+             "ws://127.0.0.1:%d/ws", TEST_PORT);
+    snprintf(config.token, sizeof(config.token), "test-token");
+
+    ts->cf_id = cf_proxy_init(rt, &config);
+
+    actor_id_t tester = actor_spawn(rt, svc_tester_behavior, ts, NULL, 32);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    runtime_destroy(rt);
+    waitpid(server, NULL, 0);
 }
 
 /* ── Tests ─────────────────────────────────────────────────────────── */
@@ -536,6 +645,152 @@ static int test_kv_not_found(void) {
     return 0;
 }
 
+static int test_db_query(void) {
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.send_type = MSG_CF_DB_QUERY;
+    ts.payload = "sql=SELECT * FROM logs\np=boot";
+    run_svc_test(&ts);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_ROWS);
+    ASSERT(strstr(ts.reply, "boot") != NULL);
+    ASSERT(strstr(ts.reply, "ping") != NULL);
+    return 0;
+}
+
+static int test_db_exec(void) {
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.send_type = MSG_CF_DB_EXEC;
+    ts.payload = "sql=INSERT INTO logs(msg) VALUES(?)\np=hello";
+    run_svc_test(&ts);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_OK);
+    ASSERT(strcmp(ts.reply, "1") == 0);
+    return 0;
+}
+
+static int test_queue_push(void) {
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.send_type = MSG_CF_QUEUE_PUSH;
+    ts.payload = "body=test payload\ndelay=0";
+    run_svc_test(&ts);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_OK);
+    return 0;
+}
+
+static int test_ai_infer(void) {
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.send_type = MSG_CF_AI_INFER;
+    ts.payload = "prompt=Explain actor model";
+    run_svc_test(&ts);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_VALUE);
+    ASSERT(strstr(ts.reply, "actor model") != NULL);
+    return 0;
+}
+
+static int test_ai_embed(void) {
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.send_type = MSG_CF_AI_EMBED;
+    ts.payload = "text=actor model message passing";
+    run_svc_test(&ts);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_EMBEDDING);
+    ASSERT(strstr(ts.reply, "0.1") != NULL);
+    return 0;
+}
+
+static int test_embed_large_frame(void) {
+    /* Test that WS frames larger than HTTP_READ_BUF_SIZE are handled.
+     * Generates a ~9 KB embedding response to exercise the dynamic
+     * large-frame buffer in process_ws_data. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Child: mock server returning large embedding */
+        int lfd = listen_tcp(TEST_PORT);
+        struct timeval atv = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &atv, sizeof(atv));
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd < 0) { close(lfd); _exit(1); }
+
+        char req[4096];
+        read_request(cfd, req, sizeof(req));
+        char key[64];
+        if (!extract_ws_key(req, key, sizeof(key))) _exit(1);
+        ws_accept_response(cfd, key);
+
+        uint8_t buf[4096];
+        uint8_t opcode;
+        /* Auth */
+        ws_read_frame(cfd, &opcode, buf, sizeof(buf));
+        ws_send_text(cfd, "{\"type\":\"auth_ok\",\"tenant\":\"test\"}");
+        usleep(10000);
+
+        struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        /* Embed request */
+        ws_read_frame(cfd, &opcode, buf, sizeof(buf));
+
+        /* Build large response: 1000 floats ≈ 9 KB (> HTTP_READ_BUF_SIZE) */
+        char *large = malloc(16384);
+        int pos = snprintf(large, 16384,
+            "{\"req_id\":1,\"type\":\"ai_embed_ok\",\"embedding\":[");
+        for (int i = 0; i < 1000; i++) {
+            if (i > 0) large[pos++] = ',';
+            pos += snprintf(large + pos, 16384 - (size_t)pos, "0.%06d", i + 1);
+        }
+        pos += snprintf(large + pos, 16384 - (size_t)pos, "]}");
+        ws_send_text(cfd, large);
+        free(large);
+
+        usleep(100000);
+        close(cfd); close(lfd);
+        _exit(0);
+    }
+    usleep(50000);
+
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+
+    cf_proxy_config_t config;
+    memset(&config, 0, sizeof(config));
+    snprintf(config.url, sizeof(config.url),
+             "ws://127.0.0.1:%d/ws", TEST_PORT);
+    snprintf(config.token, sizeof(config.token), "test-token");
+
+    actor_id_t cf_id = cf_proxy_init(rt, &config);
+
+    svc_tester_state_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.cf_id = cf_id;
+    ts.send_type = MSG_CF_AI_EMBED;
+    ts.payload = "text=large embedding test";
+
+    actor_id_t tester = actor_spawn(rt, svc_tester_behavior, &ts, NULL, 32);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.done);
+    ASSERT_EQ(ts.reply_type, MSG_CF_EMBEDDING);
+    /* First float should be present in the (truncated) reply buffer */
+    ASSERT(strstr(ts.reply, "0.000001") != NULL);
+
+    runtime_destroy(rt);
+    waitpid(pid, NULL, 0);
+    return 0;
+}
+
 static int test_namespace_paths(void) {
     /* No mock server needed — just test path registration (no WS) */
     runtime_t *rt = runtime_init(1, 64);
@@ -549,11 +804,19 @@ static int test_namespace_paths(void) {
     actor_id_t cf_id = cf_proxy_init(rt, &config);
     ASSERT_NE(cf_id, ACTOR_ID_INVALID);
 
-    actor_id_t canon = actor_lookup(rt, "/node/cloudflare/storage/kv");
-    ASSERT_EQ(canon, cf_id);
+    /* Canonical paths */
+    ASSERT_EQ(actor_lookup(rt, "/node/cloudflare/storage/kv"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/cloudflare/storage/db"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/cloudflare/queue/default"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/cloudflare/ai/infer"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/cloudflare/ai/embed"), cf_id);
 
-    actor_id_t virt = actor_lookup(rt, "/node/storage/kv");
-    ASSERT_EQ(virt, cf_id);
+    /* Virtual short paths */
+    ASSERT_EQ(actor_lookup(rt, "/node/storage/kv"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/storage/db"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/queue/default"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/ai/infer"), cf_id);
+    ASSERT_EQ(actor_lookup(rt, "/node/ai/embed"), cf_id);
 
     runtime_destroy(rt);
     return 0;
@@ -570,6 +833,12 @@ int main(void) {
     RUN_TEST(test_kv_delete);
     RUN_TEST(test_kv_list);
     RUN_TEST(test_kv_not_found);
+    RUN_TEST(test_db_query);
+    RUN_TEST(test_db_exec);
+    RUN_TEST(test_queue_push);
+    RUN_TEST(test_ai_infer);
+    RUN_TEST(test_ai_embed);
+    RUN_TEST(test_embed_large_frame);
     RUN_TEST(test_namespace_paths);
 
     TEST_REPORT();

@@ -5,3 +5,16 @@ compatibility_date = "2025-12-01"
 [[kv_namespaces]]
 binding = "KV"
 id = "782f25b244d14fa59d19242924fb6033"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mk-proxy-db"
+database_id = "4460ad2e-3f62-482a-bd91-3b4a18de31c3"
+
+# Queue (uncomment after creating with: npx wrangler queues create mk-proxy-queue)
+# [[queues.producers]]
+# binding = "QUEUE"
+# queue = "mk-proxy-queue"
+
+[ai]
+binding = "AI"

@@ -7,6 +7,7 @@
 #include "microkernel/namespace.h"
 #include "json_util.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -17,6 +18,23 @@
 #define CF_BACKOFF_MAX   30000   /* 30s */
 #define CF_JSON_BUF      1024
 #define CF_REPLY_BUF     4096
+
+/* Debug logging (compiled out unless CF_PROXY_DEBUG is defined) */
+#ifdef CF_PROXY_DEBUG
+static void cf_log(const char *fmt, ...) {
+    printf("[cf_proxy] ");
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+    fflush(stdout);
+}
+#define CF_LOG cf_log
+#else
+static inline void cf_log_noop(const char *fmt, ...) { (void)fmt; }
+#define CF_LOG cf_log_noop
+#endif
 
 /* ── Pending request tracking ─────────────────────────────────────── */
 
@@ -77,9 +95,13 @@ static int pending_alloc(cf_proxy_state_t *s, actor_id_t requester,
             s->pending[i].req_id = s->next_req_id++;
             s->pending[i].requester = requester;
             s->pending[i].req_type = req_type;
+            CF_LOG("pending_alloc: slot=%d req_id=%u type=%u from=%llu",
+                   i, s->pending[i].req_id, (unsigned)req_type,
+                   (unsigned long long)requester);
             return i;
         }
     }
+    CF_LOG("pending_alloc: FULL (16 slots occupied)");
     return -1;
 }
 
@@ -116,8 +138,11 @@ static void schedule_reconnect(cf_proxy_state_t *s, runtime_t *rt) {
 /* Send a JSON message over WebSocket. */
 static bool ws_send_json(cf_proxy_state_t *s, runtime_t *rt,
                           const char *json, size_t len) {
-    if (!s->connected || s->ws_conn == HTTP_CONN_ID_INVALID)
+    if (!s->connected || s->ws_conn == HTTP_CONN_ID_INVALID) {
+        CF_LOG("ws_send: not connected");
         return false;
+    }
+    CF_LOG("ws_send: %.*s", (int)(len > 200 ? 200 : len), json);
     return actor_ws_send_text(rt, s->ws_conn, json, len);
 }
 
@@ -199,17 +224,180 @@ static void handle_kv_request(cf_proxy_state_t *s, runtime_t *rt,
     }
 }
 
+/* ── Handle DB request from local actor ───────────────────────────── */
+
+static void handle_db_request(cf_proxy_state_t *s, runtime_t *rt,
+                               message_t *msg) {
+    if (!s->connected || !s->authed) {
+        const char *err = "not connected";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    int idx = pending_alloc(s, msg->source, msg->type);
+    if (idx < 0) {
+        const char *err = "pending queue full";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    const char *payload = msg->payload;
+    size_t plen = msg->payload_size;
+    char sql[512] = "";
+
+    char json[CF_JSON_BUF];
+    json_buf_t j;
+    json_init(&j, json, sizeof(json));
+    json_obj_open(&j);
+    json_int(&j, "req_id", (int64_t)s->pending[idx].req_id);
+
+    if (msg->type == MSG_CF_DB_QUERY)
+        json_str(&j, "type", "db_query");
+    else
+        json_str(&j, "type", "db_exec");
+
+    payload_get(payload, plen, "sql", sql, sizeof(sql));
+    json_str(&j, "sql", sql);
+
+    /* Collect p= params into JSON array */
+    json_array_open(&j, "params");
+    {
+        const char *p = payload;
+        const char *end = payload + plen;
+        while (p < end) {
+            if ((size_t)(end - p) > 2 && p[0] == 'p' && p[1] == '=') {
+                const char *vstart = p + 2;
+                const char *vend = vstart;
+                while (vend < end && *vend != '\n') vend++;
+                char param[256];
+                size_t vlen = (size_t)(vend - vstart);
+                size_t copy = vlen < sizeof(param) - 1 ? vlen : sizeof(param) - 1;
+                memcpy(param, vstart, copy);
+                param[copy] = '\0';
+                json_array_str_item(&j, param);
+                p = vend;
+            }
+            while (p < end && *p != '\n') p++;
+            if (p < end) p++;
+        }
+    }
+    json_array_close(&j);
+    json_obj_close(&j);
+
+    if (!ws_send_json(s, rt, json, json_len(&j))) {
+        s->pending[idx].occupied = false;
+        const char *err = "ws send failed";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+    }
+}
+
+/* ── Handle Queue request from local actor ────────────────────────── */
+
+static void handle_queue_request(cf_proxy_state_t *s, runtime_t *rt,
+                                  message_t *msg) {
+    if (!s->connected || !s->authed) {
+        const char *err = "not connected";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    int idx = pending_alloc(s, msg->source, msg->type);
+    if (idx < 0) {
+        const char *err = "pending queue full";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    const char *payload = msg->payload;
+    size_t plen = msg->payload_size;
+    char body[CF_REPLY_BUF] = "";
+    char delay_str[16] = "";
+
+    char json[CF_JSON_BUF];
+    json_buf_t j;
+    json_init(&j, json, sizeof(json));
+    json_obj_open(&j);
+    json_int(&j, "req_id", (int64_t)s->pending[idx].req_id);
+    json_str(&j, "type", "queue_push");
+    payload_get(payload, plen, "body", body, sizeof(body));
+    json_str(&j, "body", body);
+    payload_get(payload, plen, "delay", delay_str, sizeof(delay_str));
+    if (delay_str[0])
+        json_int(&j, "delay_seconds", strtoll(delay_str, NULL, 10));
+    json_obj_close(&j);
+
+    if (!ws_send_json(s, rt, json, json_len(&j))) {
+        s->pending[idx].occupied = false;
+        const char *err = "ws send failed";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+    }
+}
+
+/* ── Handle AI request from local actor ───────────────────────────── */
+
+static void handle_ai_request(cf_proxy_state_t *s, runtime_t *rt,
+                                message_t *msg) {
+    if (!s->connected || !s->authed) {
+        const char *err = "not connected";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    int idx = pending_alloc(s, msg->source, msg->type);
+    if (idx < 0) {
+        const char *err = "pending queue full";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+        return;
+    }
+
+    const char *payload = msg->payload;
+    size_t plen = msg->payload_size;
+    char model[128] = "";
+
+    char json[CF_JSON_BUF];
+    json_buf_t j;
+    json_init(&j, json, sizeof(json));
+    json_obj_open(&j);
+    json_int(&j, "req_id", (int64_t)s->pending[idx].req_id);
+
+    payload_get(payload, plen, "model", model, sizeof(model));
+
+    if (msg->type == MSG_CF_AI_INFER) {
+        char prompt[512] = "";
+        json_str(&j, "type", "ai_infer");
+        if (model[0]) json_str(&j, "model", model);
+        payload_get(payload, plen, "prompt", prompt, sizeof(prompt));
+        json_str(&j, "prompt", prompt);
+    } else {
+        char text[512] = "";
+        json_str(&j, "type", "ai_embed");
+        if (model[0]) json_str(&j, "model", model);
+        payload_get(payload, plen, "text", text, sizeof(text));
+        json_str(&j, "text", text);
+    }
+
+    json_obj_close(&j);
+
+    if (!ws_send_json(s, rt, json, json_len(&j))) {
+        s->pending[idx].occupied = false;
+        const char *err = "ws send failed";
+        actor_send(rt, msg->source, MSG_CF_ERROR, err, strlen(err));
+    }
+}
+
 /* ── Handle JSON response from Worker ─────────────────────────────── */
 
 static void handle_ws_response(cf_proxy_state_t *s, runtime_t *rt,
                                 const char *json, size_t len) {
-    (void)len;
+    CF_LOG("ws_recv: len=%zu type_prefix=%.*s", len,
+           (int)(len > 80 ? 80 : len), json);
 
     /* Check for auth_ok */
     char type[32] = "";
     json_get_str(json, "type", type, sizeof(type));
 
     if (strcmp(type, "auth_ok") == 0) {
+        CF_LOG("auth_ok");
         s->authed = true;
         s->backoff_ms = CF_BACKOFF_INIT;
         return;
@@ -228,26 +416,64 @@ static void handle_ws_response(cf_proxy_state_t *s, runtime_t *rt,
 
     /* All other responses should have req_id */
     int64_t req_id = json_get_int(json, "req_id", -1);
-    if (req_id < 0) return;
+    if (req_id < 0) {
+        CF_LOG("ws_recv: no req_id, type=%s", type);
+        return;
+    }
 
     int idx = pending_find(s, (uint32_t)req_id);
-    if (idx < 0) return;
+    if (idx < 0) {
+        CF_LOG("ws_recv: req_id=%lld not in pending table (stale?)",
+               (long long)req_id);
+        return;
+    }
 
     cf_pending_t *p = &s->pending[idx];
     actor_id_t requester = p->requester;
+    CF_LOG("ws_recv: req_id=%lld type=%s -> actor %llu",
+           (long long)req_id, type, (unsigned long long)requester);
     p->occupied = false;
 
-    if (strcmp(type, "ok") == 0) {
+    if (strcmp(type, "ok") == 0 ||
+        strcmp(type, "kv_put_ok") == 0 ||
+        strcmp(type, "kv_delete_ok") == 0 ||
+        strcmp(type, "queue_push_ok") == 0) {
         actor_send(rt, requester, MSG_CF_OK, NULL, 0);
-    } else if (strcmp(type, "value") == 0) {
+    } else if (strcmp(type, "db_exec_ok") == 0) {
+        /* Send rows_affected as payload */
+        int64_t affected = json_get_int(json, "rows_affected", 0);
+        char buf[32];
+        int blen = snprintf(buf, sizeof(buf), "%lld", (long long)affected);
+        actor_send(rt, requester, MSG_CF_OK, buf, (size_t)blen);
+    } else if (strcmp(type, "value") == 0 ||
+               strcmp(type, "kv_get_ok") == 0) {
         char val[CF_REPLY_BUF] = "";
         size_t vlen = json_get_str(json, "value", val, sizeof(val));
         actor_send(rt, requester, MSG_CF_VALUE, val, vlen);
-    } else if (strcmp(type, "keys") == 0) {
+    } else if (strcmp(type, "ai_infer_ok") == 0) {
+        char val[CF_REPLY_BUF] = "";
+        size_t vlen = json_get_str(json, "result", val, sizeof(val));
+        actor_send(rt, requester, MSG_CF_VALUE, val, vlen);
+    } else if (strcmp(type, "keys") == 0 ||
+               strcmp(type, "kv_list_ok") == 0) {
         char keys[CF_REPLY_BUF] = "";
         size_t klen = json_get_array_str(json, "keys", keys, sizeof(keys));
         actor_send(rt, requester, MSG_CF_KEYS, keys, klen);
-    } else if (strcmp(type, "not_found") == 0) {
+    } else if (strcmp(type, "db_query_ok") == 0) {
+        /* Pass raw JSON rows array as payload */
+        char rows[CF_REPLY_BUF] = "";
+        size_t rlen = json_get_str(json, "rows", rows, sizeof(rows));
+        actor_send(rt, requester, MSG_CF_ROWS, rows, rlen);
+    } else if (strcmp(type, "ai_embed_ok") == 0) {
+        /* Pass raw JSON embedding array as payload (may exceed CF_REPLY_BUF) */
+        size_t elen = 0;
+        const char *emb = json_find_key(json, "embedding", &elen);
+        if (emb && elen > 0)
+            actor_send(rt, requester, MSG_CF_EMBEDDING, emb, elen);
+        else
+            actor_send(rt, requester, MSG_CF_ERROR, "no embedding", 12);
+    } else if (strcmp(type, "not_found") == 0 ||
+               strcmp(type, "kv_not_found") == 0) {
         actor_send(rt, requester, MSG_CF_NOT_FOUND, NULL, 0);
     } else if (strcmp(type, "error") == 0) {
         char err[256] = "unknown error";
@@ -278,6 +504,7 @@ static bool cf_proxy_behavior(runtime_t *rt, actor_t *self,
         return true;
 
     case MSG_WS_OPEN:
+        CF_LOG("WS connected");
         s->connected = true;
         /* Send auth */
         {
@@ -303,6 +530,9 @@ static bool cf_proxy_behavior(runtime_t *rt, actor_t *self,
 
     case MSG_WS_CLOSED:
     case MSG_WS_ERROR:
+        CF_LOG("WS %s (was connected=%d authed=%d)",
+               msg->type == MSG_WS_CLOSED ? "closed" : "error",
+               s->connected, s->authed);
         s->connected = false;
         s->authed = false;
         s->ws_conn = HTTP_CONN_ID_INVALID;
@@ -324,6 +554,20 @@ static bool cf_proxy_behavior(runtime_t *rt, actor_t *self,
     case MSG_CF_KV_DELETE:
     case MSG_CF_KV_LIST:
         handle_kv_request(s, rt, msg);
+        return true;
+
+    case MSG_CF_DB_QUERY:
+    case MSG_CF_DB_EXEC:
+        handle_db_request(s, rt, msg);
+        return true;
+
+    case MSG_CF_QUEUE_PUSH:
+        handle_queue_request(s, rt, msg);
+        return true;
+
+    case MSG_CF_AI_INFER:
+    case MSG_CF_AI_EMBED:
+        handle_ai_request(s, rt, msg);
         return true;
 
     default:
@@ -349,11 +593,30 @@ actor_id_t cf_proxy_init(runtime_t *rt, const cf_proxy_config_t *config) {
     }
 
     /* Register canonical Cloudflare paths (always) */
-    actor_register_name(rt, "/node/cloudflare/storage/kv", id);
+    static const char *canonical_paths[] = {
+        "/node/cloudflare/storage/kv",
+        "/node/cloudflare/storage/db",
+        "/node/cloudflare/queue/default",
+        "/node/cloudflare/ai/infer",
+        "/node/cloudflare/ai/embed",
+        NULL
+    };
+    for (int i = 0; canonical_paths[i]; i++)
+        actor_register_name(rt, canonical_paths[i], id);
 
     /* Register virtual short paths (only if unclaimed) */
-    if (actor_lookup(rt, "/node/storage/kv") == ACTOR_ID_INVALID)
-        actor_register_name(rt, "/node/storage/kv", id);
+    static const char *virtual_paths[] = {
+        "/node/storage/kv",
+        "/node/storage/db",
+        "/node/queue/default",
+        "/node/ai/infer",
+        "/node/ai/embed",
+        NULL
+    };
+    for (int i = 0; virtual_paths[i]; i++) {
+        if (actor_lookup(rt, virtual_paths[i]) == ACTOR_ID_INVALID)
+            actor_register_name(rt, virtual_paths[i], id);
+    }
 
     /* Trigger WS connection from within actor context */
     if (config->url[0])

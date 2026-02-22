@@ -102,6 +102,11 @@ typedef struct {
     /* WebSocket state */
     char             ws_accept_key[29]; /* expected Sec-WebSocket-Accept */
 
+    /* Large WebSocket frame (dynamically allocated when frame > read_buf) */
+    uint8_t         *ws_large_buf;
+    size_t           ws_large_size;    /* total frame bytes needed */
+    size_t           ws_large_offset;  /* bytes received so far */
+
     /* Server-side fields */
     bool             is_server;
     char            *request_method;

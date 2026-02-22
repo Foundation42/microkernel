@@ -61,19 +61,29 @@ const MSG_MOUNT_RESPONSE: u32 = 106;
 const MSG_CAPS_REQUEST: u32 = 0xFF00001D;
 const MSG_CAPS_REPLY: u32 = 0xFF00001E;
 
-// Cloudflare proxy message types
+// Cloudflare proxy message types — requests
 const MSG_CF_KV_PUT: u32 = 300;
 const MSG_CF_KV_GET: u32 = 301;
 #[allow(dead_code)]
 const MSG_CF_KV_DELETE: u32 = 302;
 const MSG_CF_KV_LIST: u32 = 303;
+const MSG_CF_DB_QUERY: u32 = 304;
+const MSG_CF_DB_EXEC: u32 = 305;
+const MSG_CF_QUEUE_PUSH: u32 = 306;
+const MSG_CF_AI_INFER: u32 = 307;
+const MSG_CF_AI_EMBED: u32 = 308;
+
+// Cloudflare proxy message types — replies
 #[allow(dead_code)]
 const MSG_CF_OK: u32 = 310;
 const MSG_CF_VALUE: u32 = 311;
+#[allow(dead_code)]
+const MSG_CF_ROWS: u32 = 312;
 const MSG_CF_KEYS: u32 = 313;
 #[allow(dead_code)]
-const MSG_CF_NOT_FOUND: u32 = 315;
+const MSG_CF_EMBEDDING: u32 = 314;
 #[allow(dead_code)]
+const MSG_CF_NOT_FOUND: u32 = 315;
 const MSG_CF_ERROR: u32 = 316;
 
 // Buffer sizes
@@ -275,7 +285,11 @@ fn cmd_help() {
     print_str("  register <name>                   Register self by name\n");
     print_str("  lookup <name>                     Lookup actor by name\n");
     print_str("  mount <host>[:<port>]             Connect to remote node (default port 4200)\n");
-    print_str("  caps [target]                    Query node capabilities\n");
+    print_str("  caps [target]                     Query node capabilities\n");
+    print_str("  ai <prompt>                       Ask Workers AI (30s timeout)\n");
+    print_str("  embed <text>                      Get text embedding vector\n");
+    print_str("  sql <query>                       Run D1 SQL (SELECT/INSERT/...)\n");
+    print_str("  queue <message>                   Push message to queue\n");
     print_str("  history [clear]                   Show or clear command history\n");
     print_str("  whoami                            Show node identity and actor ID\n");
     print_str("  self                              Print own actor ID\n");
@@ -970,6 +984,165 @@ fn cmd_history_clear() {
     print_str(" history entries\n");
 }
 
+/* ── Cloud service helpers ────────────────────────────────────────── */
+
+/// Look up a service by path, send a message, wait for reply, print result.
+/// Returns true if successful.
+///
+/// Loops to skip stale fire-and-forget replies (MSG_CF_OK with empty payload)
+/// from history_record that may arrive before the real service response.
+fn call_service(path: &[u8], msg_type: u32, payload: &[u8], timeout_ms: i32) -> bool {
+    let dest = unsafe { mk_lookup(path.as_ptr(), path.len() as i32) };
+    if dest == ACTOR_ID_INVALID {
+        print_str("error: ");
+        print(path);
+        print_str(" not available\n");
+        return false;
+    }
+
+    let rc = unsafe {
+        mk_send(dest, msg_type as i32, payload.as_ptr(), payload.len() as i32)
+    };
+    if rc == 0 {
+        print_str("error: send failed\n");
+        return false;
+    }
+
+    let input_buf = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_BUF) };
+    let deadline = unsafe { mk_time_ms() } + timeout_ms as i64;
+
+    loop {
+        let remaining = deadline - unsafe { mk_time_ms() };
+        if remaining <= 0 {
+            print_str("Timeout\n");
+            return false;
+        }
+
+        let mut recv_type: u32 = 0;
+        let mut recv_size: u32 = 0;
+        let mut recv_source: i64 = 0;
+        let rc = unsafe {
+            mk_recv_timeout(
+                &mut recv_type,
+                input_buf.as_mut_ptr(),
+                input_buf.len() as i32,
+                &mut recv_size,
+                &mut recv_source,
+                remaining as i32,
+            )
+        };
+
+        if rc == -2 {
+            print_str("Timeout\n");
+            return false;
+        }
+        if rc < 0 {
+            print_str("error: recv failed\n");
+            return false;
+        }
+
+        // Skip stale fire-and-forget replies (empty OK from history_record)
+        if recv_type == MSG_CF_OK && recv_size == 0 {
+            continue;
+        }
+
+        let size = (recv_size as usize).min(input_buf.len());
+
+        if recv_type == MSG_CF_ERROR {
+            print_str("error: ");
+            if size > 0 { print(&input_buf[..size]); }
+            print_str("\n");
+            return false;
+        }
+
+        if size > 0 {
+            print(&input_buf[..size]);
+            print_str("\n");
+        }
+        return true;
+    }
+}
+
+fn cmd_ai(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("usage: ai <prompt>\n");
+        return;
+    }
+    // Build payload: prompt=<text>
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let prefix = b"prompt=";
+    let total = prefix.len() + arg.len();
+    if total > file_buf.len() {
+        print_str("error: prompt too long\n");
+        return;
+    }
+    file_buf[..prefix.len()].copy_from_slice(prefix);
+    file_buf[prefix.len()..total].copy_from_slice(arg);
+
+    call_service(b"/node/ai/infer", MSG_CF_AI_INFER, &file_buf[..total], 30000);
+}
+
+fn cmd_embed(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("usage: embed <text>\n");
+        return;
+    }
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let prefix = b"text=";
+    let total = prefix.len() + arg.len();
+    if total > file_buf.len() {
+        print_str("error: text too long\n");
+        return;
+    }
+    file_buf[..prefix.len()].copy_from_slice(prefix);
+    file_buf[prefix.len()..total].copy_from_slice(arg);
+
+    call_service(b"/node/ai/embed", MSG_CF_AI_EMBED, &file_buf[..total], 15000);
+}
+
+fn cmd_sql(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("usage: sql <query>\n");
+        return;
+    }
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let prefix = b"sql=";
+    let total = prefix.len() + arg.len();
+    if total > file_buf.len() {
+        print_str("error: query too long\n");
+        return;
+    }
+    file_buf[..prefix.len()].copy_from_slice(prefix);
+    file_buf[prefix.len()..total].copy_from_slice(arg);
+
+    // Use QUERY for SELECT, EXEC for everything else
+    let is_select = arg.len() >= 6 && (
+        starts_with(arg, b"SELECT") || starts_with(arg, b"select") ||
+        starts_with(arg, b"Select")
+    );
+    let msg_type = if is_select { MSG_CF_DB_QUERY } else { MSG_CF_DB_EXEC };
+
+    call_service(b"/node/storage/db", msg_type, &file_buf[..total], 10000);
+}
+
+fn cmd_queue(arg: &[u8]) {
+    if arg.is_empty() {
+        print_str("usage: queue <message>\n");
+        return;
+    }
+    let file_buf = unsafe { &mut *core::ptr::addr_of_mut!(FILE_BUF) };
+    let prefix = b"body=";
+    let total = prefix.len() + arg.len();
+    if total > file_buf.len() {
+        print_str("error: message too long\n");
+        return;
+    }
+    file_buf[..prefix.len()].copy_from_slice(prefix);
+    file_buf[prefix.len()..total].copy_from_slice(arg);
+
+    call_service(b"/node/queue/default", MSG_CF_QUEUE_PUSH, &file_buf[..total], 5000);
+}
+
 fn dispatch_command(line: &[u8]) {
     let trimmed = trim(line);
     if trimmed.is_empty() {
@@ -1008,6 +1181,14 @@ fn dispatch_command(line: &[u8]) {
         cmd_mount(arg);
     } else if cmd == b"caps" {
         cmd_caps(arg);
+    } else if cmd == b"ai" {
+        cmd_ai(arg);
+    } else if cmd == b"embed" {
+        cmd_embed(arg);
+    } else if cmd == b"sql" {
+        cmd_sql(arg);
+    } else if cmd == b"queue" {
+        cmd_queue(arg);
     } else if cmd == b"history" {
         if arg == b"clear" {
             cmd_history_clear();
@@ -1034,6 +1215,7 @@ pub extern "C" fn handle_message(
 
     if msg_type == MSG_INIT {
         print_str("╔════════════════════════════════════╗\n");
+        print_str("║  Entrained OS                      ║\n");
         print_str("║  microkernel WASM shell v0.2       ║\n");
         print_str("║  Type 'help' for commands          ║\n");
         print_str("╚════════════════════════════════════╝\n");
@@ -1079,9 +1261,7 @@ pub extern "C" fn handle_message(
             }
 
             // Silently discard fire-and-forget CF replies (from history_record)
-            if recv_type == MSG_CF_OK || recv_type == MSG_CF_ERROR
-                || recv_type == MSG_CF_VALUE || recv_type == MSG_CF_KEYS
-                || recv_type == MSG_CF_NOT_FOUND {
+            if recv_type >= MSG_CF_OK && recv_type <= MSG_CF_ERROR {
                 need_prompt = false;
                 continue;
             }

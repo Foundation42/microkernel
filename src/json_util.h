@@ -81,6 +81,32 @@ static inline size_t json_len(const json_buf_t *j) {
     return j->off;
 }
 
+/* ── Array builder ────────────────────────────────────────────────── */
+
+static inline void json_array_open(json_buf_t *j, const char *key) {
+    json_comma(j);
+    char tmp[128];
+    int n = snprintf(tmp, sizeof(tmp), "\"%s\":[", key);
+    json_raw(j, tmp, (size_t)n);
+    j->need_comma = 0;
+}
+
+static inline void json_array_str_item(json_buf_t *j, const char *val) {
+    if (j->need_comma) json_raw(j, ",", 1);
+    j->need_comma = 1;
+    json_raw(j, "\"", 1);
+    for (const char *p = val; *p; p++) {
+        if (*p == '"' || *p == '\\') json_raw(j, "\\", 1);
+        json_raw(j, p, 1);
+    }
+    json_raw(j, "\"", 1);
+}
+
+static inline void json_array_close(json_buf_t *j) {
+    json_raw(j, "]", 1);
+    j->need_comma = 1;
+}
+
 /* ── Parser ───────────────────────────────────────────────────────── */
 
 /* Skip whitespace */

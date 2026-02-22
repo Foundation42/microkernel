@@ -830,7 +830,27 @@ static bool send_ws_frame(http_conn_t *conn, uint8_t opcode,
     return true;
 }
 
+/* Max single WS frame we'll buffer dynamically (64 KB) */
+#define WS_MAX_LARGE_FRAME (64 * 1024)
+
+static void process_ws_frame(http_conn_t *conn, runtime_t *rt,
+                             uint8_t *frame, size_t frame_len);
+
 static bool process_ws_data(http_conn_t *conn, runtime_t *rt) {
+    /* If we're accumulating a large frame, check if it's complete */
+    if (conn->ws_large_buf) {
+        if (conn->ws_large_offset >= conn->ws_large_size) {
+            process_ws_frame(conn, rt, conn->ws_large_buf,
+                             conn->ws_large_size);
+            free(conn->ws_large_buf);
+            conn->ws_large_buf = NULL;
+            conn->ws_large_size = 0;
+            conn->ws_large_offset = 0;
+            return true;
+        }
+        return false;
+    }
+
     if (conn->read_len < 2) return false;
 
     ws_frame_info_t info;
@@ -844,10 +864,73 @@ static bool process_ws_data(http_conn_t *conn, runtime_t *rt) {
 
     /* Check if we have the full payload */
     size_t total_frame = info.header_size + info.payload_length;
+
+    /* Frame too large for read buffer — switch to dynamic allocation */
+    if (total_frame > HTTP_READ_BUF_SIZE) {
+#ifdef CF_PROXY_DEBUG
+        printf("[ws] large frame: %zu bytes (buf=%d)\n",
+               total_frame, HTTP_READ_BUF_SIZE);
+#endif
+        if (total_frame > WS_MAX_LARGE_FRAME) {
+            /* Frame exceeds safety limit — drop connection */
+            conn->state = HTTP_STATE_ERROR;
+            deliver_ws_error(conn, rt);
+            return false;
+        }
+        conn->ws_large_buf = malloc(total_frame);
+        if (!conn->ws_large_buf) {
+            conn->state = HTTP_STATE_ERROR;
+            deliver_ws_error(conn, rt);
+            return false;
+        }
+        /* Copy what we have so far into the large buffer */
+        memcpy(conn->ws_large_buf, conn->read_buf, conn->read_len);
+        conn->ws_large_size = total_frame;
+        conn->ws_large_offset = conn->read_len;
+        conn->read_len = 0;
+
+        /* Drain any TLS-buffered data immediately — poll() won't
+         * fire if the remaining bytes are in the TLS decrypt buffer
+         * rather than at the OS socket level. */
+        while (conn->ws_large_offset < conn->ws_large_size) {
+            size_t space = conn->ws_large_size - conn->ws_large_offset;
+            ssize_t n = conn->sock->read(conn->sock,
+                                          conn->ws_large_buf + conn->ws_large_offset,
+                                          space);
+            if (n > 0) {
+                conn->ws_large_offset += (size_t)n;
+            } else {
+                break;
+            }
+        }
+
+        /* If we got the full frame, process it now */
+        if (conn->ws_large_offset >= conn->ws_large_size) {
+            process_ws_frame(conn, rt, conn->ws_large_buf,
+                             conn->ws_large_size);
+            free(conn->ws_large_buf);
+            conn->ws_large_buf = NULL;
+            conn->ws_large_size = 0;
+            conn->ws_large_offset = 0;
+            return true;
+        }
+        return false; /* still need more data */
+    }
+
     if (conn->read_len < total_frame) return false;
 
-    /* Extract payload */
-    uint8_t *payload = conn->read_buf + info.header_size;
+    process_ws_frame(conn, rt, conn->read_buf, total_frame);
+    buf_consume(conn, total_frame);
+    return true;
+}
+
+/* Process a complete WS frame from the given buffer */
+static void process_ws_frame(http_conn_t *conn, runtime_t *rt,
+                             uint8_t *frame, size_t frame_len) {
+    ws_frame_info_t info;
+    ws_frame_parse_header(frame, frame_len, &info);
+
+    uint8_t *payload = frame + info.header_size;
     size_t plen = (size_t)info.payload_length;
 
     /* Unmask if needed (server frames usually aren't masked, but handle it) */
@@ -877,8 +960,7 @@ static bool process_ws_data(http_conn_t *conn, runtime_t *rt) {
         conn->sock->write(conn->sock, close_frame, close_len);
         conn->state = HTTP_STATE_DONE;
         deliver_ws_closed(conn, rt, code);
-        buf_consume(conn, total_frame);
-        return true;
+        break;
     }
     case WS_OPCODE_PING:
         /* Auto-respond with pong */
@@ -890,9 +972,6 @@ static bool process_ws_data(http_conn_t *conn, runtime_t *rt) {
     default:
         break;
     }
-
-    buf_consume(conn, total_frame);
-    return true;
 }
 
 /* ── Main driver ───────────────────────────────────────────────────── */
@@ -948,6 +1027,40 @@ void http_conn_drive(http_conn_t *conn, short revents, runtime_t *rt) {
 
     /* Handle POLLIN for receiving */
     if (revents & (POLLIN | POLLHUP | POLLERR)) {
+        /* Large WS frame accumulation — read directly into dynamic buffer.
+         * Loop to drain TLS internal buffers: poll() won't fire POLLIN
+         * if remaining bytes are in the TLS decrypt buffer rather than
+         * at the OS socket level. */
+        if (conn->ws_large_buf) {
+            while (conn->ws_large_offset < conn->ws_large_size) {
+                size_t space = conn->ws_large_size - conn->ws_large_offset;
+                ssize_t n = conn->sock->read(conn->sock,
+                                              conn->ws_large_buf + conn->ws_large_offset,
+                                              space);
+                if (n > 0) {
+                    conn->ws_large_offset += (size_t)n;
+                } else if (n == 0) {
+                    free(conn->ws_large_buf);
+                    conn->ws_large_buf = NULL;
+                    conn->state = HTTP_STATE_DONE;
+                    deliver_ws_closed(conn, rt, 1006);
+                    return;
+                } else {
+                    break; /* EAGAIN / EWOULDBLOCK — wait for next poll */
+                }
+            }
+            /* Check if complete */
+            if (conn->ws_large_offset >= conn->ws_large_size) {
+                process_ws_frame(conn, rt, conn->ws_large_buf,
+                                 conn->ws_large_size);
+                free(conn->ws_large_buf);
+                conn->ws_large_buf = NULL;
+                conn->ws_large_size = 0;
+                conn->ws_large_offset = 0;
+            }
+            return;
+        }
+
         /* Read into buffer */
         size_t space = HTTP_READ_BUF_SIZE - conn->read_len;
         if (space > 0) {
@@ -1525,6 +1638,8 @@ void actor_http_close(runtime_t *rt, http_conn_id_t id) {
     conn->body_buf = NULL;
     free(conn->sse_data);
     conn->sse_data = NULL;
+    free(conn->ws_large_buf);
+    conn->ws_large_buf = NULL;
     free(conn->request_method);
     conn->request_method = NULL;
     free(conn->request_path);
