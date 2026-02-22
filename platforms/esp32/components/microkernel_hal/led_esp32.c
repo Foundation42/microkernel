@@ -65,7 +65,8 @@ void led_hal_deconfigure(void) {
 bool led_hal_set_pixel(int index, uint8_t r, uint8_t g, uint8_t b) {
     if (!s_configured || index < 0 || index >= s_num_leds)
         return false;
-    return led_strip_set_pixel(s_strip, index, r, g, b) == ESP_OK;
+    /* WS2812 wire format is GRB; led_strip_set_pixel sends in parameter order */
+    return led_strip_set_pixel(s_strip, index, g, r, b) == ESP_OK;
 }
 
 bool led_hal_show(void) {
