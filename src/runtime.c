@@ -7,6 +7,7 @@
 #include "microkernel/supervision.h"
 #include "microkernel/namespace.h"
 #include "runtime_internal.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -934,8 +935,7 @@ const char *runtime_get_state_path(runtime_t *rt) {
 
 void runtime_set_state_path(runtime_t *rt, const char *path) {
     if (path) {
-        strncpy(rt->state_base_path, path, sizeof(rt->state_base_path) - 1);
-        rt->state_base_path[sizeof(rt->state_base_path) - 1] = '\0';
+        snprintf(rt->state_base_path, sizeof(rt->state_base_path), "%s", path);
     } else {
         rt->state_base_path[0] = '\0';
     }

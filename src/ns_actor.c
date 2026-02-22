@@ -59,8 +59,7 @@ static int ns_path_register(ns_state_t *s, const char *path, actor_id_t id) {
     }
     for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
         if (!s->paths[i].occupied) {
-            strncpy(s->paths[i].path, path, NS_PATH_MAX - 1);
-            s->paths[i].path[NS_PATH_MAX - 1] = '\0';
+            snprintf(s->paths[i].path, NS_PATH_MAX, "%s", path);
             s->paths[i].actor_id = id;
             s->paths[i].occupied = true;
             return NS_OK;
@@ -95,8 +94,7 @@ static int ns_mount_add(ns_state_t *s, const char *mount_point,
     }
     for (size_t i = 0; i < NS_MAX_MOUNTS; i++) {
         if (!s->mounts[i].occupied) {
-            strncpy(s->mounts[i].mount_point, mount_point, NS_PATH_MAX - 1);
-            s->mounts[i].mount_point[NS_PATH_MAX - 1] = '\0';
+            snprintf(s->mounts[i].mount_point, NS_PATH_MAX, "%s", mount_point);
             s->mounts[i].target = target;
             s->mounts[i].occupied = true;
             return NS_OK;
@@ -339,7 +337,7 @@ void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
             /* Broadcast deregistration to peers */
             path_unregister_payload_t p;
             memset(&p, 0, sizeof(p));
-            strncpy(p.path, s->paths[i].path, NS_PATH_MAX - 1);
+            snprintf(p.path, NS_PATH_MAX, "%s", s->paths[i].path);
             runtime_broadcast_registry(rt, MSG_PATH_UNREGISTER,
                                         &p, sizeof(p));
             memset(&s->paths[i], 0, sizeof(path_entry_t));
@@ -386,7 +384,7 @@ void ns_sync_to_transport(runtime_t *rt, transport_t *tp) {
         if (!reg[i].occupied) continue;
         name_register_payload_t p;
         memset(&p, 0, sizeof(p));
-        strncpy(p.name, reg[i].name, 63);
+        snprintf(p.name, sizeof(p.name), "%s", reg[i].name);
         p.actor_id = reg[i].actor_id;
         message_t *msg = message_create(ACTOR_ID_INVALID, ACTOR_ID_INVALID,
                                          MSG_NAME_REGISTER, &p, sizeof(p));
@@ -400,7 +398,7 @@ void ns_sync_to_transport(runtime_t *rt, transport_t *tp) {
         if (!s->paths[i].occupied) continue;
         path_register_payload_t p;
         memset(&p, 0, sizeof(p));
-        strncpy(p.path, s->paths[i].path, NS_PATH_MAX - 1);
+        snprintf(p.path, NS_PATH_MAX, "%s", s->paths[i].path);
         p.actor_id = s->paths[i].actor_id;
         message_t *msg = message_create(ACTOR_ID_INVALID, ACTOR_ID_INVALID,
                                          MSG_PATH_REGISTER, &p, sizeof(p));
@@ -447,7 +445,7 @@ int ns_mount_connect(runtime_t *rt, const char *host, uint16_t port,
     memset(&hello, 0, sizeof(hello));
     hello.magic = htonl(MOUNT_HELLO_MAGIC);
     hello.node_id = htonl(runtime_get_node_id(rt));
-    strncpy(hello.identity, mk_node_identity(), 31);
+    snprintf(hello.identity, sizeof(hello.identity), "%s", mk_node_identity());
     if (send(fd, &hello, sizeof(hello), 0) != sizeof(hello)) {
         close(fd); return -1;
     }
@@ -479,7 +477,7 @@ int ns_mount_connect(runtime_t *rt, const char *host, uint16_t port,
 
     if (result) {
         memset(result, 0, sizeof(*result));
-        strncpy(result->identity, peer.identity, 31);
+        snprintf(result->identity, sizeof(result->identity), "%s", peer.identity);
         result->node_id = peer_node;
     }
     return 0;
@@ -540,7 +538,7 @@ static bool mount_listener_behavior(runtime_t *rt, actor_t *self,
     memset(&hello, 0, sizeof(hello));
     hello.magic = htonl(MOUNT_HELLO_MAGIC);
     hello.node_id = htonl(runtime_get_node_id(rt));
-    strncpy(hello.identity, mk_node_identity(), 31);
+    snprintf(hello.identity, sizeof(hello.identity), "%s", mk_node_identity());
     if (send(client_fd, &hello, sizeof(hello), 0) != sizeof(hello)) {
         close(client_fd); return true;
     }

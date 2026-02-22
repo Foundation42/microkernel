@@ -1,6 +1,7 @@
 #include "runtime_internal.h"
 #include "microkernel/message.h"
 #include "microkernel/namespace.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Forward declarations for runtime-level broadcast */
@@ -27,8 +28,7 @@ bool name_registry_insert(runtime_t *rt, const char *name, actor_id_t id) {
     for (size_t i = 0; i < cap; i++) {
         size_t idx = (h + i) % cap;
         if (!reg[idx].occupied) {
-            strncpy(reg[idx].name, name, 64 - 1);
-            reg[idx].name[64 - 1] = '\0';
+            snprintf(reg[idx].name, sizeof(reg[idx].name), "%s", name);
             reg[idx].actor_id = id;
             reg[idx].occupied = true;
             return true;
@@ -49,7 +49,7 @@ bool actor_register_name(runtime_t *rt, const char *name, actor_id_t id) {
         /* Broadcast path registration to peers */
         path_register_payload_t payload;
         memset(&payload, 0, sizeof(payload));
-        strncpy(payload.path, name, 128 - 1);
+        snprintf(payload.path, sizeof(payload.path), "%s", name);
         payload.actor_id = id;
         runtime_broadcast_registry(rt, MSG_PATH_REGISTER,
                                     &payload, sizeof(payload));
@@ -61,8 +61,7 @@ bool actor_register_name(runtime_t *rt, const char *name, actor_id_t id) {
     /* Broadcast to all peers */
     name_register_payload_t payload;
     memset(&payload, 0, sizeof(payload));
-    strncpy(payload.name, name, 64 - 1);
-    payload.name[64 - 1] = '\0';
+    snprintf(payload.name, sizeof(payload.name), "%s", name);
     payload.actor_id = id;
     runtime_broadcast_registry(rt, MSG_NAME_REGISTER, &payload, sizeof(payload));
     return true;
@@ -109,8 +108,7 @@ void name_registry_deregister_actor(runtime_t *rt, actor_id_t id) {
             /* Broadcast unregister to peers before clearing */
             name_unregister_payload_t payload;
             memset(&payload, 0, sizeof(payload));
-            strncpy(payload.name, reg[i].name, 64 - 1);
-            payload.name[64 - 1] = '\0';
+            snprintf(payload.name, sizeof(payload.name), "%s", reg[i].name);
             runtime_broadcast_registry(rt, MSG_NAME_UNREGISTER,
                                         &payload, sizeof(payload));
             memset(&reg[i], 0, sizeof(name_entry_t));

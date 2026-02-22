@@ -230,7 +230,7 @@ actor_id_t local_kv_init(runtime_t *rt, const local_kv_config_t *config) {
     local_kv_state_t *s = calloc(1, sizeof(*s));
     if (!s) return ACTOR_ID_INVALID;
 
-    strncpy(s->base_path, config->base_path, sizeof(s->base_path) - 1);
+    snprintf(s->base_path, sizeof(s->base_path), "%s", config->base_path);
 
     /* Ensure base directory exists (Linux; ESP32 SPIFFS has flat namespace) */
 #ifndef ESP_PLATFORM

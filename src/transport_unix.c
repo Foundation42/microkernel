@@ -1,5 +1,6 @@
 #include "microkernel/transport_unix.h"
 #include "microkernel/wire.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -170,7 +171,7 @@ transport_t *transport_unix_listen(const char *path, node_id_t peer_node) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
 
     unlink(path);  /* remove stale socket */
 
@@ -200,7 +201,7 @@ transport_t *transport_unix_listen(const char *path, node_id_t peer_node) {
     impl->listen_fd = fd;
     impl->conn_fd = -1;
     impl->is_server = true;
-    strncpy(impl->path, path, sizeof(impl->path) - 1);
+    snprintf(impl->path, sizeof(impl->path), "%s", path);
     impl->read_target = WIRE_HEADER_SIZE;
 
     tp->peer_node = peer_node;
@@ -221,7 +222,7 @@ transport_t *transport_unix_connect(const char *path, node_id_t peer_node) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd);

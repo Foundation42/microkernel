@@ -28,7 +28,7 @@ CONFIG_WAMR_ENABLE_LIB_PTHREAD=n
 CONFIG_SPIFFS_OBJ_NAME_LEN=64
 
 # ── Size optimizations ────────────────────────────────────────────────
-# Compile for size instead of debug (-Os vs -Og).
+# Compile for size (-Os vs -Og). Saves ~190 KB flash.
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE=y
 

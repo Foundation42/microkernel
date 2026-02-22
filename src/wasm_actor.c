@@ -937,15 +937,14 @@ reload_result_t actor_reload_wasm(runtime_t *rt, actor_id_t old_id,
     for (size_t i = 0; i < reg_cap; i++) {
         if (reg[i].occupied && reg[i].actor_id == old_id) {
             char name_copy[64];
-            strncpy(name_copy, reg[i].name, sizeof(name_copy) - 1);
-            name_copy[sizeof(name_copy) - 1] = '\0';
+            snprintf(name_copy, sizeof(name_copy), "%s", reg[i].name);
             /* Remove old entry and insert with new ID */
             name_registry_remove_by_name(rt, name_copy);
             name_registry_insert(rt, name_copy, new_id);
             /* Broadcast update to peers */
             name_register_payload_t payload;
             memset(&payload, 0, sizeof(payload));
-            strncpy(payload.name, name_copy, 64 - 1);
+            snprintf(payload.name, sizeof(payload.name), "%s", name_copy);
             payload.actor_id = new_id;
             runtime_broadcast_registry(rt, MSG_NAME_REGISTER,
                                         &payload, sizeof(payload));
