@@ -26,6 +26,7 @@ idf_component_register(
         "${MK_SRC_DIR}/cf_proxy.c"
         "${MK_SRC_DIR}/local_kv.c"
         "${MK_SRC_DIR}/state_persist.c"
+        "${MK_SRC_DIR}/gpio_actor.c"
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../../include"
     PRIV_INCLUDE_DIRS

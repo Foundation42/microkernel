@@ -23,6 +23,7 @@
 #include "microkernel/cf_proxy.h"
 #include "microkernel/local_kv.h"
 #include "microkernel/state_persist.h"
+#include "microkernel/gpio.h"
 #include <errno.h>
 #include <lwip/sockets.h>
 
@@ -1921,6 +1922,16 @@ static void *shell_runner(void *arg) {
         strncpy(kv_cfg.base_path, "/storage", sizeof(kv_cfg.base_path) - 1);
         local_kv_init(rt, &kv_cfg);
         ESP_LOGI(TAG, "shell: local_kv started (base=/storage)");
+    }
+
+    /* Start GPIO actor */
+    {
+        actor_id_t gpio_id = gpio_actor_init(rt);
+        if (gpio_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: gpio actor started (id=%" PRIu64 ")",
+                     (uint64_t)gpio_id);
+        else
+            ESP_LOGW(TAG, "shell: gpio actor init failed");
     }
 
 #ifdef CF_PROXY_URL

@@ -40,6 +40,18 @@
 #define MSG_CAPS_REQUEST      ((msg_type_t)0xFF00001D)
 #define MSG_CAPS_REPLY        ((msg_type_t)0xFF00001E)
 
+/* Phase 21: GPIO actor */
+#define MSG_GPIO_CONFIGURE    ((msg_type_t)0xFF000020)
+#define MSG_GPIO_WRITE        ((msg_type_t)0xFF000021)
+#define MSG_GPIO_READ         ((msg_type_t)0xFF000022)
+#define MSG_GPIO_SUBSCRIBE    ((msg_type_t)0xFF000023)
+#define MSG_GPIO_UNSUBSCRIBE  ((msg_type_t)0xFF000024)
+/* 0xFF000025–0xFF000027 reserved for PWM/ADC/I2C */
+#define MSG_GPIO_OK           ((msg_type_t)0xFF000028)
+#define MSG_GPIO_VALUE        ((msg_type_t)0xFF000029)
+#define MSG_GPIO_ERROR        ((msg_type_t)0xFF00002A)
+#define MSG_GPIO_EVENT        ((msg_type_t)0xFF00002B)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {
