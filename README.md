@@ -24,8 +24,10 @@ scheduler with integrated I/O polling.
 - **WASM actors** -- spawn actors from `.wasm` bytecode via WAMR
 - **WASM fibers** -- `mk_sleep_ms()` and `mk_recv()` for blocking-style concurrency in WASM
 - **Hot code reload** -- atomic WASM module swap preserving names, mailbox, and supervisor state; shell `reload` command
+- **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
+- **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop/reload actors, send messages, load `.wasm` from files or URLs, persistent command history via Cloudflare KV
-- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, and interactive shell
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, and interactive shell
 
 ## Building (Linux)
 
