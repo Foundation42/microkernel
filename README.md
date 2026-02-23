@@ -250,27 +250,27 @@ mk-shell v0.3 (native)
 Type 'help' for commands.
 
 > list
-  SEQ  ID               STATUS   MBOX  NAME
-    1  0x0100000000001  running  0/16  shell
-    2  0x0100000000002  running  0/16  /sys/mount-listen
-    3  0x0100000000003  running  0/16  ns
-    4  0x0100000000004  running  0/16  console
-    5  0x0100000000005  running  0/16  local_kv
-    6  0x0100000000006  running  0/16  cf_proxy
-                                       /node/storage/kv
-                                       /node/storage/db
-                                       /node/queue/default
-                                       /node/ai/infer
-                                       /node/ai/embed
+  SEQ  ID                STATUS   MBOX  NAME
+  1    0x000010000000001 idle     0/16  shell
+  2    0x000010000000002 idle     0/16  /sys/mount-listen
+  3    0x000010000000003 idle     0/16  ns
+  4    0x000010000000004 idle     0/16  console
+  5    0x000010000000005 idle     0/16  local_kv
+  6    0x000010000000006 idle     0/16  cf_proxy
+                                        /node/storage/kv
+                                        /node/storage/db
+                                        /node/queue/default
+                                        /node/ai/infer
+                                        /node/ai/embed
 > info
 Actors: 6 active
-  SEQ  ID               STATUS   MBOX  PARENT           NAME
-    1  0x0100000000001  running  0/16  ---              shell
-    2  0x0100000000002  running  0/16  ---              /sys/mount-listen
-    3  0x0100000000003  running  0/16  ---              ns
-    4  0x0100000000004  running  0/16  ---              console
-    5  0x0100000000005  running  0/16  ---              local_kv
-    6  0x0100000000006  running  0/16  ---              cf_proxy
+  SEQ  ID                STATUS   MBOX  PARENT            NAME
+  1    0x000010000000001 idle     0/64  ---               ns
+  2    0x000010000000002 idle     0/16  ---               /sys/mount-listen
+  3    0x000010000000003 idle     0/16  ---               console
+  4    0x000010000000004 idle     0/16  ---               local_kv
+  5    0x000010000000005 idle     0/32  ---               cf_proxy
+  6    0x000010000000006 running  0/32  ---               shell
 
 Heap: 213 KB free / 327 KB (min 212 KB, largest 128 KB)
   DRAM:  213 KB free / 327 KB

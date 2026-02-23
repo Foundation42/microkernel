@@ -184,7 +184,7 @@ static void cmd_list(runtime_t *rt) {
         snprintf(mbox, sizeof(mbox), "%zu/%zu",
                  info[i].mailbox_used, info[i].mailbox_cap);
 
-        printf("  %-4u 0x%015" PRIx64 "  %-8s %-5s %.*s\n",
+        printf("  %-4u 0x%015" PRIx64 " %-8s %-5s %.*s\n",
                (unsigned)seq,
                (uint64_t)info[i].id,
                status_str(info[i].status),
@@ -557,7 +557,7 @@ static void cmd_info(runtime_t *rt) {
         else
             snprintf(parent, sizeof(parent), "---");
 
-        printf("  %-4u 0x%015" PRIx64 "  %-8s %-5s %-17s %.*s\n",
+        printf("  %-4u 0x%015" PRIx64 " %-8s %-5s %-17s %.*s\n",
                (unsigned)seq,
                (uint64_t)info[i].id,
                status_str(info[i].status),
