@@ -148,10 +148,15 @@ actor_id_t actor_lookup(runtime_t *rt, const char *name);
 bool actor_send_named(runtime_t *rt, const char *name, msg_type_t type,
                       const void *payload, size_t payload_size);
 
-/* Reverse lookup: find name for actor ID (flat registry + namespace paths).
+/* Reverse lookup: find first name for actor ID (flat registry + namespace paths).
    Returns name length (0 if not found). */
 size_t actor_reverse_lookup(runtime_t *rt, actor_id_t id,
                             char *buf, size_t buf_size);
+
+/* Reverse lookup ALL names for an actor (comma+space separated).
+   Returns total bytes written (0 if none found). */
+size_t actor_reverse_lookup_all(runtime_t *rt, actor_id_t id,
+                                char *buf, size_t buf_size);
 
 /* ── Logging API ───────────────────────────────────────────────────── */
 

@@ -138,3 +138,30 @@ size_t actor_reverse_lookup(runtime_t *rt, actor_id_t id,
     /* Try namespace path table */
     return ns_reverse_lookup_path(rt, id, buf, buf_size);
 }
+
+size_t actor_reverse_lookup_all(runtime_t *rt, actor_id_t id,
+                                char *buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return 0;
+
+    size_t off = 0;
+
+    /* Scan flat name registry */
+    name_entry_t *reg = runtime_get_name_registry(rt);
+    size_t cap = runtime_get_name_registry_size();
+    for (size_t i = 0; i < cap; i++) {
+        if (reg[i].occupied && reg[i].actor_id == id) {
+            size_t len = strlen(reg[i].name);
+            size_t need = (off > 0 ? 2 : 0) + len;
+            if (off + need >= buf_size) continue;
+            if (off > 0) { buf[off++] = ','; buf[off++] = ' '; }
+            memcpy(buf + off, reg[i].name, len);
+            off += len;
+        }
+    }
+
+    /* Also collect namespace paths */
+    ns_reverse_lookup_all_paths(rt, id, buf, buf_size, &off);
+
+    buf[off] = '\0';
+    return off;
+}

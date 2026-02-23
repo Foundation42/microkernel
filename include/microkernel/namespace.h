@@ -80,6 +80,12 @@ void       ns_deregister_actor_paths(runtime_t *rt, actor_id_t id);
 size_t     ns_reverse_lookup_path(runtime_t *rt, actor_id_t id,
                                   char *buf, size_t buf_size);
 
+/* Collect ALL paths for an actor, appending ", "-separated entries to buf
+   starting at *offset.  Updates *offset.  Returns number of paths found. */
+size_t     ns_reverse_lookup_all_paths(runtime_t *rt, actor_id_t id,
+                                       char *buf, size_t buf_size,
+                                       size_t *offset);
+
 /* Synchronous call to namespace actor (waiter actor pattern).
    Caller provides MSG_NS_* type + payload, gets ns_reply_t back.
    Only safe from outside the scheduler (init code, tests). */

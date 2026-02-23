@@ -329,6 +329,30 @@ size_t ns_reverse_lookup_path(runtime_t *rt, actor_id_t id,
     return 0;
 }
 
+size_t ns_reverse_lookup_all_paths(runtime_t *rt, actor_id_t id,
+                                   char *buf, size_t buf_size,
+                                   size_t *offset) {
+    ns_state_t *s = runtime_get_ns_state(rt);
+    if (!s || !buf || buf_size == 0) return 0;
+    size_t found = 0;
+    size_t off = *offset;
+    for (size_t i = 0; i < NS_MAX_PATH_ENTRIES; i++) {
+        if (s->paths[i].occupied && s->paths[i].actor_id == id) {
+            size_t len = strlen(s->paths[i].path);
+            /* Need room for ", " separator + name + NUL */
+            size_t need = (off > 0 ? 2 : 0) + len;
+            if (off + need >= buf_size) continue;  /* skip if no room */
+            if (off > 0) { buf[off++] = ','; buf[off++] = ' '; }
+            memcpy(buf + off, s->paths[i].path, len);
+            off += len;
+            found++;
+        }
+    }
+    buf[off] = '\0';
+    *offset = off;
+    return found;
+}
+
 void ns_deregister_actor_paths(runtime_t *rt, actor_id_t id) {
     ns_state_t *s = runtime_get_ns_state(rt);
     if (!s) return;
