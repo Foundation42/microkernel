@@ -153,37 +153,54 @@ static void cmd_help(void) {
     );
 }
 
-static void print_names_aligned(const char *names, int indent) {
-    const char *p = names;
-    bool first = true;
-    while (*p) {
-        const char *next = strchr(p, ',');
-        int len = next ? (int)(next - p) : (int)strlen(p);
-        if (first)
-            printf("%.*s\n", len, p);
-        else
-            printf("%*s%.*s\n", indent, "", len, p);
-        first = false;
-        p = next ? next + 2 : p + len;  /* skip ", " */
+static const char *status_str(actor_status_t s) {
+    switch (s) {
+    case ACTOR_IDLE:    return "idle";
+    case ACTOR_READY:   return "ready";
+    case ACTOR_RUNNING: return "running";
+    case ACTOR_STOPPED: return "stopped";
+    default:            return "?";
     }
 }
 
 static void cmd_list(runtime_t *rt) {
-    actor_id_t ids[32];
-    size_t count = runtime_list_actors(rt, ids, 32);
-    printf("Active actors (%zu):\n", count);
-    for (size_t i = 0; i < count; i++) {
+    actor_info_t info[64];
+    size_t n = runtime_actor_info(rt, info, 64);
+
+    printf("  %-4s %-17s %-8s %-5s %s\n",
+           "SEQ", "ID", "STATUS", "MBOX", "NAME");
+
+    for (size_t i = 0; i < n; i++) {
+        uint32_t seq = actor_id_seq(info[i].id);
         char names[512];
-        size_t nlen = actor_reverse_lookup_all(rt, ids[i], names, sizeof(names));
-        /* "  <id>  " prefix — measure width for alignment */
-        char prefix[32];
-        int plen = snprintf(prefix, sizeof(prefix),
-                            "  %" PRIu64 "  ", (uint64_t)ids[i]);
-        printf("%s", prefix);
-        if (nlen > 0)
-            print_names_aligned(names, plen);
-        else
-            printf("\n");
+        size_t nlen = actor_reverse_lookup_all(rt, info[i].id,
+                                                names, sizeof(names));
+        const char *first = nlen > 0 ? names : "-";
+        size_t flen = nlen;
+        const char *comma = nlen > 0 ? strchr(names, ',') : NULL;
+        if (comma) flen = (size_t)(comma - names);
+
+        char mbox[12];
+        snprintf(mbox, sizeof(mbox), "%zu/%zu",
+                 info[i].mailbox_used, info[i].mailbox_cap);
+
+        printf("  %-4u 0x%015" PRIx64 "  %-8s %-5s %.*s\n",
+               (unsigned)seq,
+               (uint64_t)info[i].id,
+               status_str(info[i].status),
+               mbox,
+               (int)flen, first);
+
+        if (comma) {
+            const char *p = comma + 2;
+            while (*p) {
+                const char *next = strchr(p, ',');
+                int len = next ? (int)(next - p) : (int)strlen(p);
+                printf("  %4s %-17s %-8s %-5s %.*s\n",
+                       "", "", "", "", len, p);
+                p = next ? next + 2 : p + len;
+            }
+        }
     }
 }
 
@@ -469,16 +486,6 @@ static void print_kb(size_t bytes) {
 }
 #endif
 
-static const char *status_str(actor_status_t s) {
-    switch (s) {
-    case ACTOR_IDLE:    return "idle";
-    case ACTOR_READY:   return "ready";
-    case ACTOR_RUNNING: return "run";
-    case ACTOR_STOPPED: return "stop";
-    default:            return "?";
-    }
-}
-
 static void cmd_info(runtime_t *rt) {
     /* ── Header line ──────────────────────────────────────────────── */
     printf("%s", mk_node_identity());
@@ -525,34 +532,46 @@ static void cmd_info(runtime_t *rt) {
     actor_info_t info[64];
     size_t n = runtime_actor_info(rt, info, 64);
 
-    printf("\nActors: %zu/%zu\n", n, runtime_get_max_actors(rt));
-    printf("  %-5s %-28s %s  %s\n", "SEQ", "NAME", "MBOX", "STATE");
+    printf("\nActors: %zu active\n", n);
+    printf("  %-4s %-17s %-8s %-5s %-17s %s\n",
+           "SEQ", "ID", "STATUS", "MBOX", "PARENT", "NAME");
 
     for (size_t i = 0; i < n; i++) {
         uint32_t seq = actor_id_seq(info[i].id);
         char names[512];
         size_t nlen = actor_reverse_lookup_all(rt, info[i].id,
                                                 names, sizeof(names));
-        /* Find first name (up to first comma) for the table column */
         const char *first = nlen > 0 ? names : "-";
         size_t flen = nlen;
         const char *comma = nlen > 0 ? strchr(names, ',') : NULL;
         if (comma) flen = (size_t)(comma - names);
 
-        printf("  %-5u %-28.*s %zu/%-3zu %s\n",
-               (unsigned)seq,
-               (int)flen, first,
-               info[i].mailbox_used,
-               info[i].mailbox_cap,
-               status_str(info[i].status));
+        char mbox[12];
+        snprintf(mbox, sizeof(mbox), "%zu/%zu",
+                 info[i].mailbox_used, info[i].mailbox_cap);
 
-        /* Print additional names indented on continuation lines */
+        char parent[20];
+        if (info[i].parent != ACTOR_ID_INVALID)
+            snprintf(parent, sizeof(parent), "0x%015" PRIx64,
+                     (uint64_t)info[i].parent);
+        else
+            snprintf(parent, sizeof(parent), "---");
+
+        printf("  %-4u 0x%015" PRIx64 "  %-8s %-5s %-17s %.*s\n",
+               (unsigned)seq,
+               (uint64_t)info[i].id,
+               status_str(info[i].status),
+               mbox,
+               parent,
+               (int)flen, first);
+
         if (comma) {
-            const char *p = comma + 2;  /* skip ", " */
+            const char *p = comma + 2;
             while (*p) {
                 const char *next = strchr(p, ',');
                 int len = next ? (int)(next - p) : (int)strlen(p);
-                printf("        %-28.*s\n", len, p);
+                printf("  %4s %-17s %-8s %-5s %-17s %.*s\n",
+                       "", "", "", "", "", len, p);
                 p = next ? next + 2 : p + len;
             }
         }
