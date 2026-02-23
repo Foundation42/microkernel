@@ -611,6 +611,8 @@ actor_id_t ns_mount_listen(runtime_t *rt, uint16_t port) {
         return ACTOR_ID_INVALID;
     }
 
+    actor_register_name(rt, "/sys/mount-listen", id);
+
     /* Kick the actor so it starts watching the fd */
     runtime_deliver_msg(rt, id, 1, NULL, 0);
     return id;
