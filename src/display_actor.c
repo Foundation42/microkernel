@@ -9,6 +9,10 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#endif
+
 /* ── Display state ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -202,7 +206,14 @@ actor_id_t display_actor_init(runtime_t *rt) {
     }
 
     ds->width = w;
+#ifdef ESP_PLATFORM
+    /* Force internal RAM — PSRAM buffers cause DMA cache coherency issues
+       with the QSPI display controller (GDMA reads bypass D-Cache). */
+    ds->row_buf = heap_caps_calloc((size_t)w * FONT_HEIGHT, sizeof(uint16_t),
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
     ds->row_buf = calloc((size_t)w * FONT_HEIGHT, sizeof(uint16_t));
+#endif
     if (!ds->row_buf) {
         free(ds);
         display_hal_deinit();
