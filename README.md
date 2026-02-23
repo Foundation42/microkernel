@@ -27,7 +27,7 @@ scheduler with integrated I/O polling.
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
-- **Interactive shell** -- Rust WASM REPL over TCP; spawn/stop/reload actors, send messages (text or hex-encoded binary), load `.wasm` from files or URLs, persistent command history via Cloudflare KV
+- **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, and interactive shell
 
 ## Building (Linux)
@@ -238,62 +238,76 @@ func handleMessage(msgType int32, source int64, payload *byte, payloadSize int32
 func main() {}
 ```
 
-### Interactive WASM shell
+### Interactive shell
 
-The microkernel includes an interactive shell written in Rust, compiled to WASM,
-and running as an actor inside the runtime. On ESP32 it listens on TCP port 23
-after WiFi connects:
+The microkernel includes a native C shell (`mk-shell v0.3`) running as an actor
+inside the runtime. A console actor bridges platform I/O (UART on ESP32,
+stdin on Linux) into the actor message loop, with a reusable readline library
+providing arrow-key command history, line editing, and escape sequence handling.
 
 ```
-$ nc 192.168.1.135 23
-╔════════════════════════════════════╗
-║  Entrained OS                      ║
-║  microkernel WASM shell v0.2       ║
-║  Type 'help' for commands          ║
-╚════════════════════════════════════╝
-mk> load http://192.168.1.235:8080/files/build/tests/echo.wasm
-Downloaded 1031 bytes
-Loading...
-Spawned actor 4294967299 as 'echo'
-mk> call echo 200 hello
-[reply] type=201 from=4294967299 size=5 "hello"
-mk> ai Explain the actor model in one sentence
-The actor model is a concurrent computing approach where process...
-mk> stop echo
-Stopped actor 4294967299
-mk> exit
+mk-shell v0.3 (native)
+Type 'help' for commands.
+
+> list
+  SEQ  ID               STATUS   MBOX  NAME
+    1  0x0100000000001  running  0/16  shell
+    2  0x0100000000002  running  0/16  /sys/mount-listen
+    3  0x0100000000003  running  0/16  ns
+    4  0x0100000000004  running  0/16  console
+    5  0x0100000000005  running  0/16  local_kv
+    6  0x0100000000006  running  0/16  cf_proxy
+                                       /node/storage/kv
+                                       /node/storage/db
+                                       /node/queue/default
+                                       /node/ai/infer
+                                       /node/ai/embed
+> info
+Actors: 6 active
+  SEQ  ID               STATUS   MBOX  PARENT           NAME
+    1  0x0100000000001  running  0/16  ---              shell
+    2  0x0100000000002  running  0/16  ---              /sys/mount-listen
+    3  0x0100000000003  running  0/16  ---              ns
+    4  0x0100000000004  running  0/16  ---              console
+    5  0x0100000000005  running  0/16  ---              local_kv
+    6  0x0100000000006  running  0/16  ---              cf_proxy
+
+Heap: 213 KB free / 327 KB (min 212 KB, largest 128 KB)
+  DRAM:  213 KB free / 327 KB
+> load echo.wasm
+Spawned actor 7 as 'echo'
+> call echo 200 hello
+[reply] type=201 from=0x0100000000007 size=5 "hello"
+> stop echo
+Stopped actor 0x0100000000007
+> exit
 Goodbye.
 ```
 
-The shell itself fits in a single 64KB WASM page (`#![no_std]`, static buffers,
-no allocator). A C console actor bridges TCP I/O into the actor message loop.
-On Linux, the same shell binary runs with stdin/stdout via `tools/shell/`.
-
-Commands: `help`, `list`, `ls /prefix`, `self`, `whoami`, `load <path-or-url>`,
-`reload <name> <path-or-url>`, `send <name-or-id> <type> [data|x:hex]`,
+Commands: `help`, `list`, `info` (alias `top`), `self`, `whoami`,
+`load <path>`, `reload <name> <path>`, `send <name-or-id> <type> [data|x:hex]`,
 `call <name-or-id> <type> [data|x:hex]`, `stop <name-or-id>`,
-`register <name>`, `lookup <name>`, `mount <host>[:<port>]`,
-`caps [target]`, `ai <prompt>`, `embed <text>`, `sql <query>`,
-`queue <message>`, `history [clear]`, `exit`
+`register <name>`, `lookup <name>`, `ls [/prefix]`,
+`mount <host>[:<port>]`, `caps [target]`, `exit`
 
 The `send` and `call` commands accept an optional `x:` prefix on the payload to
 send hex-encoded binary data (e.g., `call led 4278190145 x:0000ff000000` sends
 6 raw bytes). This is essential for hardware actors that use binary struct
 payloads.
 
-Loaded actors are auto-registered by filename (`echo.wasm` becomes `echo`; duplicates
-get `echo_1`, `echo_2`, etc.). The `call` command sends a message and waits up to 5
-seconds for a reply. Unsolicited messages from actors are printed between prompts.
+The `info` command shows per-actor details (mailbox usage, parent, all registered
+names) and on ESP32 includes heap breakdown (DRAM/PSRAM, free, watermark, largest
+free block). Actors with multiple registered names display each name on its own
+aligned continuation line.
 
-Building the shell WASM module:
+Loaded WASM actors are auto-registered by filename (`echo.wasm` becomes `echo`;
+duplicates get `echo_1`, `echo_2`, etc.). The `call` command sends a message and
+waits up to 5 seconds for a reply.
 
-```bash
-cd tools/shell/shell_wasm
-cargo build --target wasm32-unknown-unknown --release
-```
-
-The same binary runs on both Linux and ESP32 -- a single 64KB WASM page via
-`.cargo/config.toml` (16KB stack, 32KB file buffer).
+The readline library (`mk_readline.h`) is reusable outside the shell -- it
+provides history browsing (up/down arrows), cursor movement (left/right, Home,
+End), word/line kill (Ctrl+U/K/W), and insert-anywhere editing with no
+heap allocation.
 
 ### Cloudflare cloud services
 
@@ -369,11 +383,11 @@ push pixels to hardware. `SET_ALL` and `CLEAR` auto-flush.
 interactive shell using hex-encoded binary payloads (`x:` prefix):
 
 ```
-mk> call led 4278190144 x:08000100
+> call led 4278190144 x:08000100
 [reply] type=4278190156 from=12 size=0 ""
-mk> call led 4278190145 x:0000ff000000
+> call led 4278190145 x:0000ff000000
 [reply] type=4278190156 from=12 size=0 ""
-mk> call led 4278190149
+> call led 4278190149
 [reply] type=4278190156 from=12 size=0 ""
 ```
 
@@ -387,15 +401,17 @@ to decode the hex string into a binary payload instead of sending it as text.
 
 ```
 include/microkernel/    Public headers (types, runtime, actor, message, services,
-                        transport, http, mk_socket, supervision, wasm_actor,
-                        namespace, cf_proxy, gpio, i2c, pwm, led)
+                        transport, http, mk_socket, mk_readline, shell,
+                        supervision, wasm_actor, namespace, cf_proxy,
+                        gpio, i2c, pwm, led)
 src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, hot reload, namespace,
-                        cf_proxy, local_kv, state_persist, hardware actors,
-                        HAL interfaces + Linux mocks, wire format, utilities)
+                        cf_proxy, local_kv, state_persist, shell, readline,
+                        hardware actors, HAL interfaces + Linux mocks,
+                        wire format, utilities)
 tests/                  39 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (C and WAT)
-tools/shell/            Interactive shell (C driver + Rust WASM REPL)
+tools/shell/            Shell driver (C console actor + mk-shell binary)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)
 platforms/esp32/        ESP-IDF project (components: microkernel, microkernel_hal)
 platforms/cloudflare/   Cloudflare Worker (mk-proxy) for cloud KV, D1, AI
