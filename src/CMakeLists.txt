@@ -32,6 +32,8 @@ add_library(microkernel STATIC
     pwm_hal_linux.c
     led_actor.c
     led_hal_linux.c
+    shell_actor.c
+    mk_readline.c
 )
 
 target_include_directories(microkernel PUBLIC

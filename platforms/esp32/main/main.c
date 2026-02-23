@@ -27,17 +27,27 @@
 #include "microkernel/i2c.h"
 #include "microkernel/pwm.h"
 #include "microkernel/led.h"
+#include "microkernel/shell.h"
+#include "microkernel/mk_readline.h"
 #include <errno.h>
-#include <lwip/sockets.h>
+
+/* Console driver for VFS select/poll on STDIN */
+#ifdef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#else
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
+#endif
 
 #if SOC_WIFI_SUPPORTED
 #include <esp_wifi.h>
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <nvs_flash.h>
+#include <lwip/sockets.h>
 #include "microkernel/transport_tcp.h"
 #include "microkernel/http.h"
-#include <lwip/sockets.h>
 #include "wifi_config.h"
 #endif
 
@@ -1599,26 +1609,20 @@ static void *wasm_test_runner(void *arg) {
 }
 #endif /* RUN_SMOKE_TESTS */
 
-/* ── Interactive WASM Shell ─────────────────────────────────────────── */
-
-#define MSG_SHELL_INPUT          100
-#define MSG_SHELL_INIT           101
-#define MSG_SPAWN_REQUEST        102
-#define MSG_SPAWN_RESPONSE       103
-#define MSG_SPAWN_REQUEST_NAMED  104
-#define MSG_MOUNT_REQUEST        105
-#define MSG_MOUNT_RESPONSE       106
-#define MSG_RELOAD_REQUEST       107
-#define MSG_RELOAD_RESPONSE      108
+/* ── Interactive Shell ──────────────────────────────────────────────── */
 
 typedef struct {
-    actor_id_t shell;
-    int        client_fd;  /* TCP client socket */
-    bool       watching;
-    bool       last_was_cr; /* for CRLF across read boundaries */
-    char       line_buf[256];
-    size_t     line_len;
+    actor_id_t    shell;
+    int           console_fd;  /* STDIN fd (UART / USB Serial JTAG) */
+    bool          watching;
+    mk_readline_t rl;
 } shell_console_state_t;
+
+static void console_write_cb(const char *buf, size_t len, void *ctx) {
+    (void)ctx;
+    fwrite(buf, 1, len, stdout);
+    fflush(stdout);
+}
 
 static bool shell_console_behavior(runtime_t *rt, actor_t *self,
                                     message_t *msg, void *state_ptr) {
@@ -1627,215 +1631,47 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
 
     if (msg->type == MSG_SHELL_INIT) {
         actor_register_name(rt, "console", actor_self(rt));
-        actor_watch_fd(rt, cs->client_fd, POLLIN);
+        mk_rl_init(&cs->rl, "> ", console_write_cb, NULL);
+        actor_watch_fd(rt, cs->console_fd, POLLIN);
         cs->watching = true;
+        /* Show the first prompt (shell banner already printed) */
+        mk_rl_prompt(&cs->rl);
         return true;
     }
 
-    if (msg->type == MSG_SPAWN_REQUEST) {
-        /* Payload = raw WASM bytes; spawn a new WASM actor */
-        actor_id_t new_id = ACTOR_ID_INVALID;
-        if (msg->payload && msg->payload_size > 0) {
-            new_id = actor_spawn_wasm(rt, msg->payload, msg->payload_size,
-                                       32,
-                                       WASM_DEFAULT_STACK_SIZE,
-                                       0,  /* no app heap — modules use static buffers */
-                                       FIBER_STACK_NONE);  /* no fiber — saves 16KB heap */
-        }
-        actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
-                   &new_id, sizeof(new_id));
-        return true;
-    }
-
-    if (msg->type == MSG_SPAWN_REQUEST_NAMED) {
-        /* Payload: name_len(1) + name(name_len) + wasm_bytes */
-        actor_id_t new_id = ACTOR_ID_INVALID;
-        if (!msg->payload || msg->payload_size < 2) {
-            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
-                       &new_id, sizeof(new_id));
-            return true;
-        }
-
-        const uint8_t *p = msg->payload;
-        uint8_t name_len = p[0];
-        if (name_len > 63) name_len = 63;
-        if (msg->payload_size < (size_t)(1 + name_len)) {
-            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
-                       &new_id, sizeof(new_id));
-            return true;
-        }
-
-        char name[64];
-        memcpy(name, &p[1], name_len);
-        name[name_len] = '\0';
-
-        const uint8_t *wasm_bytes = &p[1 + name_len];
-        size_t wasm_size = msg->payload_size - 1 - name_len;
-
-        ESP_LOGI("shell", "SPAWN_NAMED: name='%s' wasm_size=%zu payload_size=%zu "
-                 "magic=[%02x %02x %02x %02x]",
-                 name, wasm_size, (size_t)msg->payload_size,
-                 wasm_size >= 4 ? wasm_bytes[0] : 0,
-                 wasm_size >= 4 ? wasm_bytes[1] : 0,
-                 wasm_size >= 4 ? wasm_bytes[2] : 0,
-                 wasm_size >= 4 ? wasm_bytes[3] : 0);
-
-        if (wasm_size > 0) {
-            new_id = actor_spawn_wasm(rt, wasm_bytes, wasm_size, 32,
-                                       WASM_DEFAULT_STACK_SIZE,
-                                       0,  /* no app heap — modules use static buffers */
-                                       FIBER_STACK_NONE);  /* no fiber — saves 16KB heap */
-        }
-
-        if (new_id != ACTOR_ID_INVALID) {
-            /* Register with base name, fall back to name_1, name_2, ... */
-            char base[60];
-            size_t bn = strlen(name);
-            if (bn > sizeof(base) - 1) bn = sizeof(base) - 1;
-            memcpy(base, name, bn);
-            base[bn] = '\0';
-
-            char reg_name[64];
-            strncpy(reg_name, base, sizeof(reg_name) - 1);
-            reg_name[sizeof(reg_name) - 1] = '\0';
-
-            if (!actor_register_name(rt, reg_name, new_id)) {
-                for (int i = 1; i <= 99; i++) {
-                    snprintf(reg_name, sizeof(reg_name), "%s_%d", base, i);
-                    if (actor_register_name(rt, reg_name, new_id))
-                        break;
-                }
-            }
-
-            /* Response: actor_id(8) + registered name */
-            size_t rname_len = strlen(reg_name);
-            uint8_t resp[8 + 64];
-            memcpy(resp, &new_id, 8);
-            memcpy(resp + 8, reg_name, rname_len);
-            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
-                       resp, 8 + rname_len);
-        } else {
-            actor_send(rt, msg->source, MSG_SPAWN_RESPONSE,
-                       &new_id, sizeof(new_id));
-        }
-        return true;
-    }
-
-    if (msg->type == MSG_MOUNT_REQUEST) {
-        /* Payload: host_len(1) + host(host_len) + port_le(2) */
-        uint8_t resp[64];
-        if (!msg->payload || msg->payload_size < 4) {
-            resp[0] = 1;
-            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
-            return true;
-        }
-        const uint8_t *p = msg->payload;
-        uint8_t host_len = p[0];
-        if (msg->payload_size < (size_t)(1 + host_len + 2)) {
-            resp[0] = 1;
-            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
-            return true;
-        }
-        char host[256];
-        memcpy(host, &p[1], host_len);
-        host[host_len] = '\0';
-        uint16_t port;
-        memcpy(&port, &p[1 + host_len], 2);
-
-        mount_result_t result;
-        int rc = ns_mount_connect(rt, host, port, &result);
-        if (rc == 0) {
-            resp[0] = 0;
-            size_t ilen = strlen(result.identity);
-            memcpy(&resp[1], result.identity, ilen);
-            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE,
-                       resp, 1 + ilen);
-        } else {
-            resp[0] = 1;
-            actor_send(rt, msg->source, MSG_MOUNT_RESPONSE, resp, 1);
-        }
-        return true;
-    }
-
-    if (msg->type == MSG_RELOAD_REQUEST) {
-        /* Payload: name_len(1) + name(name_len) + wasm_bytes */
-        uint8_t resp[9] = { 0 };  /* status(1) + new_actor_id(8) */
-        if (!msg->payload || msg->payload_size < 2) {
-            resp[0] = 1;  /* error */
-            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
-            return true;
-        }
-
-        const uint8_t *p = msg->payload;
-        uint8_t name_len = p[0];
-        if (name_len > 63) name_len = 63;
-        if (msg->payload_size < (size_t)(1 + name_len)) {
-            resp[0] = 1;
-            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
-            return true;
-        }
-
-        char name[64];
-        memcpy(name, &p[1], name_len);
-        name[name_len] = '\0';
-
-        const uint8_t *wasm_bytes = &p[1 + name_len];
-        size_t wasm_size = msg->payload_size - 1 - name_len;
-
-        /* Resolve name to actor ID */
-        actor_id_t target = actor_lookup(rt, name);
-        if (target == ACTOR_ID_INVALID) {
-            resp[0] = 2;  /* not found */
-            actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
-            return true;
-        }
-
-        actor_id_t new_id;
-        reload_result_t rc = actor_reload_wasm(rt, target, wasm_bytes,
-                                                wasm_size, &new_id);
-        resp[0] = (uint8_t)rc;
-        memcpy(&resp[1], &new_id, 8);
-        actor_send(rt, msg->source, MSG_RELOAD_RESPONSE, resp, sizeof(resp));
+    if (msg->type == MSG_SHELL_PROMPT) {
+        fflush(stdout);  /* flush any shell output first */
+        mk_rl_prompt(&cs->rl);
         return true;
     }
 
     if (msg->type == MSG_FD_EVENT) {
         const fd_event_payload_t *ev = msg->payload;
-        if (ev->fd != cs->client_fd) return true;
+        if (ev->fd != cs->console_fd) return true;
 
-        /* Read available bytes from TCP client */
         char tmp[64];
-        ssize_t n = read(cs->client_fd, tmp, sizeof(tmp));
+        ssize_t n = read(cs->console_fd, tmp, sizeof(tmp));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return true;  /* spurious wakeup, retry later */
-            ESP_LOGE("shell", "TCP read error: %d", errno);
+                return true;
+            ESP_LOGE("shell", "console read error: %d", errno);
             runtime_stop(rt);
             return true;
         }
-        if (n == 0) {
-            /* Client disconnected (FIN) */
-            ESP_LOGI("shell", "TCP client disconnected");
-            runtime_stop(rt);
+        if (n == 0)
             return true;
-        }
 
-        /* Accumulate into line buffer, send complete lines */
         for (ssize_t i = 0; i < n; i++) {
-            /* Skip \n that follows \r (CRLF), even across read boundaries */
-            if (tmp[i] == '\n' && cs->last_was_cr) {
-                cs->last_was_cr = false;
-                continue;
-            }
-            cs->last_was_cr = (tmp[i] == '\r');
-
-            if (tmp[i] == '\n' || tmp[i] == '\r') {
-                cs->line_buf[cs->line_len] = '\0';
+            int rc = mk_rl_feed(&cs->rl, (uint8_t)tmp[i]);
+            if (rc == MK_RL_DONE) {
+                mk_rl_history_add(&cs->rl, cs->rl.line);
                 actor_send(rt, cs->shell, MSG_SHELL_INPUT,
-                           cs->line_buf, cs->line_len);
-                cs->line_len = 0;
-            } else if (cs->line_len < sizeof(cs->line_buf) - 1) {
-                cs->line_buf[cs->line_len++] = tmp[i];
+                           cs->rl.line, strlen(cs->rl.line));
+            } else if (rc == MK_RL_EOF) {
+                printf("Bye!\n");
+                fflush(stdout);
+                runtime_stop(rt);
+                return true;
             }
         }
         return true;
@@ -1844,81 +1680,29 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
     return true;
 }
 
-#define SHELL_TCP_PORT 23
-
 static void *shell_runner(void *arg) {
     (void)arg;
-
-    /* Start TCP listener for shell access */
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
-        ESP_LOGE(TAG, "shell: socket() failed");
-        return NULL;
-    }
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(SHELL_TCP_PORT),
-        .sin_addr.s_addr = INADDR_ANY,
-    };
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "shell: bind() failed");
-        close(listen_fd);
-        return NULL;
-    }
-    listen(listen_fd, 1);
-    ESP_LOGI(TAG, "shell: listening on port %d — connect with: nc <ip> %d",
-             SHELL_TCP_PORT, SHELL_TCP_PORT);
-
-    /* Block until a client connects */
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-    close(listen_fd);
-    if (client_fd < 0) {
-        ESP_LOGE(TAG, "shell: accept() failed");
-        return NULL;
-    }
-    ESP_LOGI(TAG, "shell: TCP client connected from %s",
-             inet_ntoa(client_addr.sin_addr));
-
-    /* Set client socket non-blocking for poll-driven reads */
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-
-    /* Disable Nagle for interactive responsiveness */
-    int nodelay = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-
-    /* Redirect mk_print output to the TCP socket */
-    wasm_actor_set_print_fd(client_fd);
-
-    /* Use system allocator for WAMR. With smoke tests disabled, the heap
-       is not fragmented, so 64KB contiguous blocks are available. */
-    if (!wasm_actors_init()) {
-        ESP_LOGE(TAG, "shell: wasm_actors_init failed");
-        close(client_fd);
-        return NULL;
-    }
 
     runtime_t *rt = runtime_init(mk_node_id(), 16);
     if (!rt) {
         ESP_LOGE(TAG, "shell: runtime_init failed");
-        wasm_actors_cleanup();
-        close(client_fd);
         return NULL;
     }
 
+    /* Best-effort WAMR init — needed for 'load' command */
+#ifdef HAVE_WASM
+    if (!wasm_actors_init())
+        ESP_LOGW(TAG, "shell: WAMR init failed, 'load' command disabled");
+#endif
+
     ns_actor_init(rt);
+#if SOC_WIFI_SUPPORTED
     ns_mount_listen(rt, MK_MOUNT_PORT);
+#endif
     caps_actor_init(rt);
 
-    /* State persistence */
     state_persist_init(rt, "/storage/_state");
 
-    /* Start local KV (claims /node/storage/kv before cf_proxy) */
     {
         local_kv_config_t kv_cfg;
         memset(&kv_cfg, 0, sizeof(kv_cfg));
@@ -1927,44 +1711,29 @@ static void *shell_runner(void *arg) {
         ESP_LOGI(TAG, "shell: local_kv started (base=/storage)");
     }
 
-    /* Start GPIO actor */
     {
         actor_id_t gpio_id = gpio_actor_init(rt);
         if (gpio_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: gpio actor started (id=%" PRIu64 ")",
                      (uint64_t)gpio_id);
-        else
-            ESP_LOGW(TAG, "shell: gpio actor init failed");
     }
-
-    /* Start I2C actor */
     {
         actor_id_t i2c_id = i2c_actor_init(rt);
         if (i2c_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: i2c actor started (id=%" PRIu64 ")",
                      (uint64_t)i2c_id);
-        else
-            ESP_LOGW(TAG, "shell: i2c actor init failed");
     }
-
-    /* Start PWM actor */
     {
         actor_id_t pwm_id = pwm_actor_init(rt);
         if (pwm_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: pwm actor started (id=%" PRIu64 ")",
                      (uint64_t)pwm_id);
-        else
-            ESP_LOGW(TAG, "shell: pwm actor init failed");
     }
-
-    /* Start LED actor */
     {
         actor_id_t led_id = led_actor_init(rt);
         if (led_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: led actor started (id=%" PRIu64 ")",
                      (uint64_t)led_id);
-        else
-            ESP_LOGW(TAG, "shell: led actor init failed");
     }
 
 #ifdef CF_PROXY_URL
@@ -1980,49 +1749,38 @@ static void *shell_runner(void *arg) {
     }
 #endif
 
-    /* Spawn shell WASM actor from embedded binary */
-    size_t shell_size = (size_t)(shell_wasm_end - shell_wasm_start);
-    ESP_LOGI(TAG, "shell: loading shell.wasm (%zu bytes, 1 page)", shell_size);
-    actor_id_t shell = actor_spawn_wasm(rt, shell_wasm_start, shell_size, 32,
-                                         WASM_DEFAULT_STACK_SIZE,
-                                         0,  /* no app heap — static buffers */
-                                         FIBER_STACK_TINY);
+    /* Spawn native shell actor */
+    actor_id_t shell = shell_actor_init(rt);
     if (shell == ACTOR_ID_INVALID) {
-        ESP_LOGE(TAG, "shell: cannot spawn shell.wasm");
+        ESP_LOGE(TAG, "shell: cannot spawn shell actor");
         runtime_destroy(rt);
-        wasm_actors_cleanup();
-        close(client_fd);
         return NULL;
     }
 
-    /* Spawn console actor (watches TCP client socket) */
+    /* Spawn console actor (watches STDIN) */
     static shell_console_state_t cs;
     memset(&cs, 0, sizeof(cs));
     cs.shell = shell;
-    cs.client_fd = client_fd;
+    cs.console_fd = STDIN_FILENO;
     actor_id_t console = actor_spawn(rt, shell_console_behavior, &cs, NULL, 16);
     if (console == ACTOR_ID_INVALID) {
         ESP_LOGE(TAG, "shell: cannot spawn console actor");
         runtime_destroy(rt);
-        wasm_actors_cleanup();
-        close(client_fd);
         return NULL;
     }
 
-    /* Send init messages */
     actor_send(rt, shell, MSG_SHELL_INIT, NULL, 0);
     actor_send(rt, console, MSG_SHELL_INIT, NULL, 0);
 
     ESP_LOGI(TAG, "shell: running (shell=%" PRIu64 " console=%" PRIu64 ")",
              (uint64_t)shell, (uint64_t)console);
 
-    /* Run event loop until client disconnects or 'exit' */
     runtime_run(rt);
 
     runtime_destroy(rt);
+#ifdef HAVE_WASM
     wasm_actors_cleanup();
-    wasm_actor_set_print_fd(-1);  /* restore stdout */
-    close(client_fd);
+#endif
     ESP_LOGI(TAG, "shell: session ended");
     return NULL;
 }
@@ -2097,6 +1855,29 @@ void app_main(void) {
     ESP_LOGI(TAG, "Smoke tests disabled (RUN_SMOKE_TESTS not defined)");
 #endif /* RUN_SMOKE_TESTS */
 
+    /* Install console driver early (before heavy allocations) so VFS
+       select/poll works on STDIN.  Must happen before WiFi init to avoid
+       heap fragmentation that would prevent WAMR's 64 KB linear memory
+       allocation. */
+#ifdef CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+    {
+        usb_serial_jtag_driver_config_t usj_cfg = {
+            .rx_buffer_size = 1024,
+            .tx_buffer_size = 1024,
+        };
+        ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj_cfg));
+        usb_serial_jtag_vfs_use_driver();
+        ESP_LOGI(TAG, "Console: USB Serial JTAG driver installed");
+    }
+#else
+    {
+        const int console_uart = CONFIG_ESP_CONSOLE_UART_NUM;
+        uart_driver_install(console_uart, 256, 0, 0, NULL, 0);
+        uart_vfs_dev_use_driver(console_uart);
+        ESP_LOGI(TAG, "Console: UART%d driver installed", console_uart);
+    }
+#endif
+
     /* Mount SPIFFS for file storage (used by shell's "load" command) */
     {
         esp_vfs_spiffs_conf_t spiffs_cfg = {
@@ -2118,15 +1899,16 @@ void app_main(void) {
 
 #if SOC_WIFI_SUPPORTED
 #ifndef RUN_SMOKE_TESTS
-    /* WiFi init when smoke tests are disabled (they normally init WiFi) */
+    /* WiFi init (best effort — shell works without it) */
     if (!wifi_init()) {
-        ESP_LOGE(TAG, "WiFi init failed, cannot start shell");
-        return;
+        ESP_LOGW(TAG, "WiFi init failed, networking features disabled");
     }
 #endif
-    /* Launch interactive WASM shell (TCP, port 23).
+#endif
+
+    /* Launch interactive WASM shell (console).
        Runs in a pthread (WAMR requirement). */
-    ESP_LOGI(TAG, "Starting interactive shell (TCP)...");
+    ESP_LOGI(TAG, "Starting interactive shell...");
     {
         esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
         pcfg.stack_size = 16384;
@@ -2139,5 +1921,4 @@ void app_main(void) {
     ESP_LOGI(TAG, "Shell terminated, resetting in 5s...");
     vTaskDelay(pdMS_TO_TICKS(5000));
     esp_restart();
-#endif
 }
