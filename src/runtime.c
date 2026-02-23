@@ -325,6 +325,22 @@ size_t runtime_list_actors(runtime_t *rt, actor_id_t *buf, size_t max_count) {
     return n;
 }
 
+size_t runtime_actor_info(runtime_t *rt, actor_info_t *buf, size_t max) {
+    size_t n = 0;
+    for (size_t i = 1; i < rt->max_actors && n < max; i++) {
+        actor_t *a = rt->actors[i];
+        if (a && a->status != ACTOR_STOPPED) {
+            buf[n].id           = a->id;
+            buf[n].status       = a->status;
+            buf[n].mailbox_used = mailbox_count(a->mailbox);
+            buf[n].mailbox_cap  = a->mailbox->capacity;
+            buf[n].parent       = a->parent;
+            n++;
+        }
+    }
+    return n;
+}
+
 /* ── Execution ──────────────────────────────────────────────────────── */
 
 /* Forward declarations for service cleanup */

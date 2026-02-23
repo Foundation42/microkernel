@@ -31,6 +31,18 @@ size_t runtime_list_actors(runtime_t *rt, actor_id_t *buf, size_t max_count);
 size_t runtime_get_max_actors(runtime_t *rt);
 size_t runtime_get_transport_count(runtime_t *rt);
 
+/** Per-actor snapshot for the `info` command and monitoring. */
+typedef struct {
+    actor_id_t     id;
+    actor_status_t status;
+    size_t         mailbox_used;
+    size_t         mailbox_cap;
+    actor_id_t     parent;
+} actor_info_t;
+
+/** Fill buf with info for up to max active actors.  Returns count written. */
+size_t runtime_actor_info(runtime_t *rt, actor_info_t *buf, size_t max);
+
 /* Execution */
 void runtime_run(runtime_t *rt);   /* Blocking event loop */
 void runtime_step(runtime_t *rt);  /* Single scheduling iteration */

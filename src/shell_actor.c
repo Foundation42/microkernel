@@ -19,6 +19,13 @@
 #include "microkernel/wasm_actor.h"
 #endif
 
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <esp_system.h>
+#include <esp_idf_version.h>
+#endif
+
 /* ── Shell state ─────────────────────────────────────────────────── */
 
 typedef struct {
@@ -129,8 +136,9 @@ static void cmd_help(void) {
         "  whoami            Show node identity\n"
         "  register <name>   Register name for shell\n"
         "  lookup <name>     Look up actor by name\n"
-        "  send <to> <type> [payload|x:hex]   Send message\n"
-        "  call <to> <type> [payload|x:hex]   Send + wait for reply\n"
+        "  send <to> <type>  [payload|x:hex]   Send message\n"
+        "  call <to> <type>  [payload|x:hex]   Send + wait for reply\n"
+        "  info              System info, heap, actors\n"
         "  stop <target>     Stop an actor\n"
 #ifdef HAVE_WASM
         "  load <path>       Load WASM actor from file\n"
@@ -430,6 +438,93 @@ static void cmd_mount(runtime_t *rt, const char *args) {
 }
 #endif
 
+/* ── info command ─────────────────────────────────────────────────── */
+
+#ifdef ESP_PLATFORM
+static void print_kb(size_t bytes) {
+    if (bytes >= 1024)
+        printf("%zu.%zu KB", bytes / 1024, (bytes % 1024) * 10 / 1024);
+    else
+        printf("%zu B", bytes);
+}
+#endif
+
+static const char *status_str(actor_status_t s) {
+    switch (s) {
+    case ACTOR_IDLE:    return "idle";
+    case ACTOR_READY:   return "ready";
+    case ACTOR_RUNNING: return "run";
+    case ACTOR_STOPPED: return "stop";
+    default:            return "?";
+    }
+}
+
+static void cmd_info(runtime_t *rt) {
+    /* ── Header line ──────────────────────────────────────────────── */
+    printf("%s", mk_node_identity());
+#ifdef ESP_PLATFORM
+    int64_t us = esp_timer_get_time();
+    printf(" | up %lld.%llds", (long long)(us / 1000000),
+           (long long)((us / 1000) % 1000) / 100);
+#endif
+    printf(" | ");
+#ifdef HAVE_WASM
+    printf("wasm ");
+#endif
+#ifdef HAVE_TLS
+    printf("tls ");
+#endif
+    printf("http\n");
+
+    /* ── Heap (ESP32 only) ────────────────────────────────────────── */
+#ifdef ESP_PLATFORM
+    {
+        size_t total = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+        size_t avail = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        size_t wmark = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+        size_t blk   = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+        printf("\nHeap: ");
+        print_kb(avail); printf(" free / "); print_kb(total);
+        printf(" (min "); print_kb(wmark);
+        printf(", largest "); print_kb(blk); printf(")\n");
+
+        size_t dt = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        size_t df = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        printf("  DRAM:  "); print_kb(df); printf(" / "); print_kb(dt); printf("\n");
+
+        size_t pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        if (pt > 0) {
+            size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            printf("  PSRAM: "); print_kb(pf); printf(" / "); print_kb(pt); printf("\n");
+        }
+    }
+#endif
+
+    /* ── Actor table ──────────────────────────────────────────────── */
+    actor_info_t info[64];
+    size_t n = runtime_actor_info(rt, info, 64);
+
+    printf("\nActors: %zu/%zu\n", n, runtime_get_max_actors(rt));
+    printf("  %-5s %-28s %s  %s\n", "SEQ", "NAME", "MBOX", "STATE");
+
+    for (size_t i = 0; i < n; i++) {
+        uint32_t seq = actor_id_seq(info[i].id);
+        char name[64];
+        size_t nlen = actor_reverse_lookup(rt, info[i].id, name, sizeof(name));
+        printf("  %-5u %-28s %zu/%-3zu %s\n",
+               (unsigned)seq,
+               nlen > 0 ? name : "-",
+               info[i].mailbox_used,
+               info[i].mailbox_cap,
+               status_str(info[i].status));
+    }
+
+    size_t tc = runtime_get_transport_count(rt);
+    if (tc > 0)
+        printf("\nTransports: %zu\n", tc);
+}
+
 static void cmd_caps(runtime_t *rt, const char *args) {
     char target_str[64];
     next_word(args, target_str, sizeof(target_str));
@@ -484,6 +579,8 @@ static void dispatch_command(runtime_t *rt, shell_state_t *sh,
         cmd_stop(rt, rest);
     } else if (strcmp(cmd, "ls") == 0) {
         cmd_ls(rt, rest);
+    } else if (strcmp(cmd, "info") == 0 || strcmp(cmd, "top") == 0) {
+        cmd_info(rt);
     } else if (strcmp(cmd, "caps") == 0) {
         cmd_caps(rt, rest);
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
