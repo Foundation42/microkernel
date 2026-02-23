@@ -19,6 +19,11 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 # (they ignore this option).
 CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
 
+# PSRAM (S3 modules with octal SPIRAM)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
 # WAMR configuration: fast interpreter only, no WASI/pthread (saves RAM)
 CONFIG_WAMR_ENABLE_AOT=n
 CONFIG_WAMR_ENABLE_LIBC_WASI=n
