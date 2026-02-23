@@ -27,6 +27,7 @@
 #include "microkernel/i2c.h"
 #include "microkernel/pwm.h"
 #include "microkernel/led.h"
+#include "microkernel/display.h"
 #include "microkernel/shell.h"
 #include "microkernel/mk_readline.h"
 #include <errno.h>
@@ -1734,6 +1735,12 @@ static void *shell_runner(void *arg) {
         if (led_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: led actor started (id=%" PRIu64 ")",
                      (uint64_t)led_id);
+    }
+    {
+        actor_id_t display_id = display_actor_init(rt);
+        if (display_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: display actor started (id=%" PRIu64 ")",
+                     (uint64_t)display_id);
     }
 
 #ifdef CF_PROXY_URL

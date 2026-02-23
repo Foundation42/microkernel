@@ -81,6 +81,16 @@
 #define MSG_LED_OK            ((msg_type_t)0xFF00004C)
 #define MSG_LED_ERROR         ((msg_type_t)0xFF00004D)
 
+/* Phase 24: Display actor */
+#define MSG_DISPLAY_DRAW       ((msg_type_t)0xFF000051)
+#define MSG_DISPLAY_FILL       ((msg_type_t)0xFF000052)
+#define MSG_DISPLAY_CLEAR      ((msg_type_t)0xFF000053)
+#define MSG_DISPLAY_BRIGHTNESS ((msg_type_t)0xFF000054)
+#define MSG_DISPLAY_POWER      ((msg_type_t)0xFF000055)
+/* 0xFF000056–0xFF00005B reserved for display extensions */
+#define MSG_DISPLAY_OK         ((msg_type_t)0xFF00005C)
+#define MSG_DISPLAY_ERROR      ((msg_type_t)0xFF00005D)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {

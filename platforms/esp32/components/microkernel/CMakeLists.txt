@@ -30,6 +30,7 @@ idf_component_register(
         "${MK_SRC_DIR}/i2c_actor.c"
         "${MK_SRC_DIR}/pwm_actor.c"
         "${MK_SRC_DIR}/led_actor.c"
+        "${MK_SRC_DIR}/display_actor.c"
         "${MK_SRC_DIR}/shell_actor.c"
         "${MK_SRC_DIR}/mk_readline.c"
     INCLUDE_DIRS

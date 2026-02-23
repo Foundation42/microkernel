@@ -44,6 +44,7 @@ add_microkernel_test(test_gpio)
 add_microkernel_test(test_i2c)
 add_microkernel_test(test_pwm)
 add_microkernel_test(test_led)
+add_microkernel_test(test_display)
 
 # Phase 12: WASM actor test
 if(HAVE_WASM)
