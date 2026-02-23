@@ -87,7 +87,8 @@
 #define MSG_DISPLAY_CLEAR      ((msg_type_t)0xFF000053)
 #define MSG_DISPLAY_BRIGHTNESS ((msg_type_t)0xFF000054)
 #define MSG_DISPLAY_POWER      ((msg_type_t)0xFF000055)
-/* 0xFF000056–0xFF00005B reserved for display extensions */
+#define MSG_DISPLAY_TEXT       ((msg_type_t)0xFF000056)
+/* 0xFF000057–0xFF00005B reserved for display extensions */
 #define MSG_DISPLAY_OK         ((msg_type_t)0xFF00005C)
 #define MSG_DISPLAY_ERROR      ((msg_type_t)0xFF00005D)
 

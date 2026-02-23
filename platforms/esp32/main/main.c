@@ -28,6 +28,7 @@
 #include "microkernel/pwm.h"
 #include "microkernel/led.h"
 #include "microkernel/display.h"
+#include "microkernel/dashboard.h"
 #include "microkernel/shell.h"
 #include "microkernel/mk_readline.h"
 #include <errno.h>
@@ -1738,9 +1739,14 @@ static void *shell_runner(void *arg) {
     }
     {
         actor_id_t display_id = display_actor_init(rt);
-        if (display_id != ACTOR_ID_INVALID)
+        if (display_id != ACTOR_ID_INVALID) {
             ESP_LOGI(TAG, "shell: display actor started (id=%" PRIu64 ")",
                      (uint64_t)display_id);
+            actor_id_t dash_id = dashboard_actor_init(rt);
+            if (dash_id != ACTOR_ID_INVALID)
+                ESP_LOGI(TAG, "shell: dashboard started (id=%" PRIu64 ")",
+                         (uint64_t)dash_id);
+        }
     }
 
 #ifdef CF_PROXY_URL

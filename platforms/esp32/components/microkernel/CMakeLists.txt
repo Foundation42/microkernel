@@ -31,6 +31,8 @@ idf_component_register(
         "${MK_SRC_DIR}/pwm_actor.c"
         "${MK_SRC_DIR}/led_actor.c"
         "${MK_SRC_DIR}/display_actor.c"
+        "${MK_SRC_DIR}/text_render.c"
+        "${MK_SRC_DIR}/dashboard_actor.c"
         "${MK_SRC_DIR}/shell_actor.c"
         "${MK_SRC_DIR}/mk_readline.c"
     INCLUDE_DIRS
@@ -38,6 +40,7 @@ idf_component_register(
     PRIV_INCLUDE_DIRS
         "${MK_SRC_DIR}"
     REQUIRES microkernel_hal wamr
+    PRIV_REQUIRES esp_timer heap esp_netif soc
 )
 
 # ESP32 has ~280 KB heap — shrink embedded pools to fit
