@@ -5,6 +5,7 @@
 #include "microkernel/services.h"
 #include "microkernel/namespace.h"
 #include "microkernel/display.h"
+#include "microkernel/console.h"
 #include "microkernel/dashboard.h"
 #include "display_hal.h"
 #include <string.h>
@@ -24,6 +25,8 @@ static int test_init(void) {
     ns_actor_init(rt);
     actor_id_t did = display_actor_init(rt);
     ASSERT_NE(did, ACTOR_ID_INVALID);
+    actor_id_t cid = mk_console_actor_init(rt);
+    ASSERT_NE(cid, ACTOR_ID_INVALID);
 
     actor_id_t dash_id = dashboard_actor_init(rt);
     ASSERT_NE(dash_id, ACTOR_ID_INVALID);
@@ -41,25 +44,44 @@ static int test_renders_on_bootstrap(void) {
     ns_actor_init(rt);
     actor_id_t did = display_actor_init(rt);
     ASSERT_NE(did, ACTOR_ID_INVALID);
+    actor_id_t cid = mk_console_actor_init(rt);
+    ASSERT_NE(cid, ACTOR_ID_INVALID);
 
     actor_id_t dash_id = dashboard_actor_init(rt);
     ASSERT_NE(dash_id, ACTOR_ID_INVALID);
 
-    /* Pump runtime to process bootstrap + display messages */
-    pump(rt, 100);
+    /* Pump runtime to process bootstrap + console + display messages.
+       Dashboard → console → display pipeline requires more steps. */
+    pump(rt, 300);
 
-    /* Header bar: fill rect at (0,0) 466x16 with COLOR_HEADER_BG.
-       COLOR_HEADER_BG = RGB565(0x00, 0x40, 0x60) = 0x0030.
-       But text rendering overwrites parts of it.
-       Pixel at far right (465, 0) should have header bg or text. */
-    uint16_t header_bg = display_mock_get_pixel(460, 0);
-    /* Should not be all black (0x0000) — header was rendered */
-    ASSERT_NE(header_bg, 0x0000);
+    /* Dashboard now renders via ANSI console at circular margin offsets.
+       Row 5 (y=80..95): node info text at margin=6 cols (x=48+).
+       Scan for any non-zero pixel in that row to confirm rendering worked. */
+    bool found_text = false;
+    for (int x = 48; x < 200; x += 8) {
+        for (int y = 80; y < 96; y += 4) {
+            if (display_mock_get_pixel((uint16_t)x, (uint16_t)y) != 0x0000) {
+                found_text = true;
+                break;
+            }
+        }
+        if (found_text) break;
+    }
+    ASSERT(found_text);
 
-    /* Text "MICROKERNEL" at (8, 0) — check a pixel in glyph area.
-       'M' glyph row 2 = 0xEE → pixel at (8, 2) should be non-zero (accent color). */
-    uint16_t text_px = display_mock_get_pixel(8, 2);
-    ASSERT_NE(text_px, 0x0000);
+    /* Row 3 (y=48..63): "MICROKERNEL" header in bright cyan.
+       Check any pixel in that row area is non-zero. */
+    bool found_header = false;
+    for (int x = 80; x < 400; x += 8) {
+        for (int y = 48; y < 64; y += 4) {
+            if (display_mock_get_pixel((uint16_t)x, (uint16_t)y) != 0x0000) {
+                found_header = true;
+                break;
+            }
+        }
+        if (found_header) break;
+    }
+    ASSERT(found_header);
 
     runtime_destroy(rt);
     return 0;
@@ -78,6 +100,8 @@ static int test_actor_list(void) {
     ns_actor_init(rt);
     actor_id_t did = display_actor_init(rt);
     ASSERT_NE(did, ACTOR_ID_INVALID);
+    actor_id_t cid = mk_console_actor_init(rt);
+    ASSERT_NE(cid, ACTOR_ID_INVALID);
 
     /* Spawn 3 named dummy actors */
     static int dummy_state;
@@ -91,19 +115,36 @@ static int test_actor_list(void) {
     actor_id_t dash_id = dashboard_actor_init(rt);
     ASSERT_NE(dash_id, ACTOR_ID_INVALID);
 
-    /* Pump runtime to process bootstrap + all display messages */
-    pump(rt, 200);
+    /* Pump runtime to process bootstrap + console + display messages */
+    pump(rt, 400);
 
-    /* Actor list section header at row 9 → y=144.
-       "ACTORS" text rendered in accent color.
-       Check a pixel in that region is non-zero. */
-    uint16_t actors_px = display_mock_get_pixel(DISPLAY_COL(1), DISPLAY_ROW(9) + 2);
-    ASSERT_NE(actors_px, 0x0000);
+    /* Actor heading at console row 13 (y=208..223), margin=0.
+       Scan for non-zero pixel confirming "ACTORS" rendered. */
+    bool found_actors = false;
+    for (int x = 0; x < 200; x += 8) {
+        for (int y = 208; y < 224; y += 4) {
+            if (display_mock_get_pixel((uint16_t)x, (uint16_t)y) != 0x0000) {
+                found_actors = true;
+                break;
+            }
+        }
+        if (found_actors) break;
+    }
+    ASSERT(found_actors);
 
-    /* Actor rows at row 10+ → y=160+.
-       Some pixel in row 10 area should have text (off-white). */
-    uint16_t row10_px = display_mock_get_pixel(DISPLAY_COL(2), DISPLAY_ROW(10) + 2);
-    ASSERT_NE(row10_px, 0x0000);
+    /* Actor list at row 14+ (y=224+), margin=0.
+       Scan for non-zero pixel in first actor row. */
+    bool found_actor_row = false;
+    for (int x = 0; x < 200; x += 8) {
+        for (int y = 224; y < 240; y += 4) {
+            if (display_mock_get_pixel((uint16_t)x, (uint16_t)y) != 0x0000) {
+                found_actor_row = true;
+                break;
+            }
+        }
+        if (found_actor_row) break;
+    }
+    ASSERT(found_actor_row);
 
     runtime_destroy(rt);
     return 0;

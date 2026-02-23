@@ -4,7 +4,7 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/namespace.h"
-#include "microkernel/display.h"
+#include "microkernel/console.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -19,26 +19,31 @@
 #endif
 #endif
 
-/* ── Dashboard colors ─────────────────────────────────────────────── */
-
-#define COLOR_BG         RGB565(0x10, 0x10, 0x18)
-#define COLOR_TEXT        RGB565(0xE0, 0xE0, 0xE0)
-#define COLOR_LABEL       RGB565(0x80, 0x80, 0x90)
-#define COLOR_ACCENT      RGB565(0x00, 0xD0, 0xF0)
-#define COLOR_HEADER_BG   RGB565(0x00, 0x40, 0x60)
-#define COLOR_BAR_FILL    RGB565(0x00, 0xC0, 0x60)
-#define COLOR_BAR_EMPTY   RGB565(0x30, 0x30, 0x38)
-#define COLOR_BAR_WARN    RGB565(0xF0, 0xA0, 0x00)
-
 #define MAX_DASHBOARD_ACTORS 16
 
-/* ── State ────────────────────────────────────────────────────────── */
+/* ── State ────────────────────────────────────────────────────────────── */
 
 typedef struct {
     timer_id_t timer_id;
+    size_t     prev_actor_count; /* track how many actor rows were drawn */
 } dashboard_state_t;
 
-/* ── Uptime ───────────────────────────────────────────────────────── */
+/* ── Circle margin table ──────────────────────────────────────────────── */
+/* Precomputed left margin (in columns) for each row on a 466×466 circular
+   display. Based on circle geometry: radius=233px center at (233,233),
+   font cell 8×16px → 58 cols × 29 rows. */
+
+static const uint8_t s_margin[CONSOLE_ROWS] = {
+    21, 16, 13, 10, 8, 6, 5, 3, 2, 2, 1, 0, 0, 0, 0,  /* rows 0-14 */
+    0, 0, 0, 1, 2, 2, 3, 5, 6, 8, 10, 13, 16, 21        /* rows 15-28 */
+};
+
+/* Available columns at each row */
+static int avail_cols(int row) {
+    return CONSOLE_COLS - 2 * (int)s_margin[row];
+}
+
+/* ── Uptime ───────────────────────────────────────────────────────────── */
 
 static uint64_t get_uptime_ms(void) {
 #ifdef ESP_PLATFORM
@@ -50,128 +55,171 @@ static uint64_t get_uptime_ms(void) {
 #endif
 }
 
-/* ── Memory bar ───────────────────────────────────────────────────── */
+/* ── Memory bar (text-mode, single printf) ────────────────────────────── */
 
 #ifdef ESP_PLATFORM
-static void render_memory_bar(runtime_t *rt, uint16_t row,
+static void render_memory_bar(runtime_t *rt, int row, int margin,
                               const char *label, size_t used, size_t total) {
-    char line[64];
-    snprintf(line, sizeof(line), "%-6s %3zuK/%3zuK",
-             label, used / 1024, total / 1024);
-    display_text(rt, DISPLAY_COL(2), DISPLAY_ROW(row),
-                 COLOR_LABEL, COLOR_BG, line);
+    int cols = CONSOLE_COLS - 2 * margin;
+    if (cols < 20) return;
 
-    /* Bar: columns 22–56 (35 cols = 280px) */
-    uint16_t bar_x = DISPLAY_COL(22);
-    uint16_t bar_w = DISPLAY_COL(35);
-    uint16_t bar_y = DISPLAY_ROW(row) + 4;
-    uint16_t bar_h = 8;
+    /* Build entire bar as one string to avoid per-char messages.
+       Format: " DRAM  123K/456K [====       ]\e[K" */
+    char line[256];
+    int pos = 0;
 
+    /* Position cursor + start color */
+    pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
+                    "\033[%d;%dH\033[37m %-6s%3zuK/%3zuK ",
+                    row + 1, margin + 1,
+                    label, used / 1024, total / 1024);
+
+    int bar_width = cols - 20 - 2; /* 20 for label+stats, 2 for [] */
+    if (bar_width < 4) bar_width = 4;
+    if (bar_width > 40) bar_width = 40;
+
+    int filled = 0;
+    int pct = 0;
     if (total > 0) {
-        uint16_t filled = (uint16_t)((uint32_t)bar_w * used / total);
-        if (filled > bar_w) filled = bar_w;
-        uint16_t pct = (uint16_t)((uint32_t)100 * used / total);
-        uint16_t fill_color = (pct > 80) ? COLOR_BAR_WARN : COLOR_BAR_FILL;
-
-        if (filled > 0)
-            display_fill_rect(rt, bar_x, bar_y, filled, bar_h, fill_color);
-        if (filled < bar_w)
-            display_fill_rect(rt, bar_x + filled, bar_y,
-                              bar_w - filled, bar_h, COLOR_BAR_EMPTY);
-    } else {
-        display_fill_rect(rt, bar_x, bar_y, bar_w, bar_h, COLOR_BAR_EMPTY);
+        pct = (int)((uint64_t)100 * used / total);
+        filled = (int)((uint64_t)bar_width * used / total);
+        if (filled > bar_width) filled = bar_width;
     }
+
+    const char *bar_color = (pct > 80) ? "\033[93m" : "\033[92m";
+    pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%s[", bar_color);
+
+    for (int i = 0; i < filled && pos < (int)sizeof(line) - 10; i++)
+        line[pos++] = '=';
+
+    pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "\033[90m");
+    for (int i = filled; i < bar_width && pos < (int)sizeof(line) - 10; i++)
+        line[pos++] = ' ';
+
+    pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
+                    "\033[37m]\033[K\033[0m");
+
+    mk_console_write(rt, line, (size_t)pos);
 }
-#endif /* ESP_PLATFORM */
+#endif
 
-/* ── Render frame ─────────────────────────────────────────────────── */
+/* ── Render frame ────────────────────────────────────────────────────── */
 
-static void render_frame(runtime_t *rt) {
-    char tmp[64];
+static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
+    char tmp[128];
 
-    /* Header bar */
-    display_fill_rect(rt, 0, 0, 466, 16, COLOR_HEADER_BG);
-    display_text(rt, 8, 0, COLOR_ACCENT, COLOR_HEADER_BG, "MICROKERNEL");
+    /* No console_clear — overwrite in place.  Use \e[K (erase to EOL)
+       at end of each line to clear stale content without causing
+       a full-screen blank flash. */
 
-    /* Node info */
-    snprintf(tmp, sizeof(tmp), "  node: %-16s id: %u",
-             mk_node_identity(), (unsigned)mk_node_id());
-    display_text(rt, 0, DISPLAY_ROW(1), COLOR_TEXT, COLOR_BG, tmp);
-
-    /* IP address (ESP32 WiFi only) */
-#if defined(ESP_PLATFORM) && SOC_WIFI_SUPPORTED
+    /* Row 3: Header — centered "MICROKERNEL" in bright cyan */
     {
+        int m = (int)s_margin[3];
+        int cols = avail_cols(3);
+        int pad = (cols - 13) / 2;
+        if (pad < 0) pad = 0;
+        mk_console_printf(rt, "\033[4;%dH%*s\033[96m MICROKERNEL \033[0m\033[K",
+                       m + 1, pad, "");
+    }
+
+    /* Row 5: Node info */
+    {
+        int m = (int)s_margin[5];
+        snprintf(tmp, sizeof(tmp), " node: %-16s id: %u",
+                 mk_node_identity(), (unsigned)mk_node_id());
+        mk_console_printf(rt, "\033[6;%dH\033[37m%s\033[K\033[0m", m + 1, tmp);
+    }
+
+    /* Row 6: IP address */
+    {
+        int m = (int)s_margin[6];
+#if defined(ESP_PLATFORM) && SOC_WIFI_SUPPORTED
         esp_netif_ip_info_t ip_info;
         esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK &&
             ip_info.ip.addr != 0) {
-            snprintf(tmp, sizeof(tmp), "  ip: " IPSTR, IP2STR(&ip_info.ip));
+            snprintf(tmp, sizeof(tmp), " ip: " IPSTR, IP2STR(&ip_info.ip));
         } else {
-            snprintf(tmp, sizeof(tmp), "  ip: not connected");
+            snprintf(tmp, sizeof(tmp), " ip: not connected");
         }
-        display_text(rt, 0, DISPLAY_ROW(2), COLOR_TEXT, COLOR_BG, tmp);
-    }
+        mk_console_printf(rt, "\033[7;%dH\033[37m%s\033[K\033[0m", m + 1, tmp);
 #else
-    display_text(rt, 0, DISPLAY_ROW(2), COLOR_LABEL, COLOR_BG,
-                 "  ip: N/A (linux)");
+        mk_console_printf(rt, "\033[7;%dH\033[90m ip: N/A (linux)\033[K\033[0m", m + 1);
+        (void)m;
 #endif
+    }
 
-    /* Uptime */
+    /* Row 7: Uptime */
     {
+        int m = (int)s_margin[7];
         uint64_t ms = get_uptime_ms();
         uint32_t secs = (uint32_t)(ms / 1000);
         uint32_t mins = secs / 60;
         uint32_t hours = mins / 60;
-        snprintf(tmp, sizeof(tmp), "  uptime: %02u:%02u:%02u",
+        snprintf(tmp, sizeof(tmp), " uptime: %02u:%02u:%02u",
                  (unsigned)(hours % 100), (unsigned)(mins % 60),
                  (unsigned)(secs % 60));
-        display_text(rt, 0, DISPLAY_ROW(3), COLOR_TEXT, COLOR_BG, tmp);
+        mk_console_printf(rt, "\033[8;%dH\033[37m%s\033[K\033[0m", m + 1, tmp);
     }
 
-    /* Memory section */
-    display_text(rt, DISPLAY_COL(1), DISPLAY_ROW(5),
-                 COLOR_ACCENT, COLOR_BG, "MEMORY");
+    /* Row 9: Memory heading */
+    {
+        int m = (int)s_margin[9];
+        mk_console_printf(rt, "\033[10;%dH\033[96m MEMORY\033[K\033[0m", m + 1);
+    }
 
+    /* Row 10–11: Memory bars */
 #ifdef ESP_PLATFORM
     {
         size_t dram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         size_t dram_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
         size_t dram_used = dram_total - dram_free;
-        render_memory_bar(rt, 6, "DRAM", dram_used, dram_total);
+        render_memory_bar(rt, 10, (int)s_margin[10], "DRAM", dram_used, dram_total);
 
         size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
         if (psram_total > 0) {
             size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
             size_t psram_used = psram_total - psram_free;
-            render_memory_bar(rt, 7, "PSRAM", psram_used, psram_total);
+            render_memory_bar(rt, 11, (int)s_margin[11], "PSRAM", psram_used, psram_total);
         } else {
-            display_text(rt, DISPLAY_COL(2), DISPLAY_ROW(7),
-                         COLOR_LABEL, COLOR_BG, "PSRAM  N/A");
+            mk_console_printf(rt, "\033[12;%dH\033[90m PSRAM  N/A\033[K\033[0m",
+                           (int)s_margin[11] + 1);
         }
     }
 #else
-    display_text(rt, DISPLAY_COL(2), DISPLAY_ROW(6),
-                 COLOR_LABEL, COLOR_BG, "DRAM   (linux host)");
-    display_text(rt, DISPLAY_COL(2), DISPLAY_ROW(7),
-                 COLOR_LABEL, COLOR_BG, "PSRAM  N/A");
+    {
+        int m10 = (int)s_margin[10];
+        int m11 = (int)s_margin[11];
+        mk_console_printf(rt, "\033[11;%dH\033[90m DRAM   (linux host)\033[K\033[0m", m10 + 1);
+        mk_console_printf(rt, "\033[12;%dH\033[90m PSRAM  N/A\033[K\033[0m", m11 + 1);
+    }
 #endif
 
-    /* Actor list */
+    /* Row 13: Actor list heading */
     actor_info_t actors[MAX_DASHBOARD_ACTORS];
     size_t count = runtime_actor_info(rt, actors, MAX_DASHBOARD_ACTORS);
 
-    snprintf(tmp, sizeof(tmp), "ACTORS (%zu)", count);
-    display_text(rt, DISPLAY_COL(1), DISPLAY_ROW(9),
-                 COLOR_ACCENT, COLOR_BG, tmp);
+    {
+        int m = (int)s_margin[13];
+        snprintf(tmp, sizeof(tmp), " ACTORS (%zu)", count);
+        mk_console_printf(rt, "\033[14;%dH\033[96m%s\033[K\033[0m", m + 1, tmp);
+    }
 
-    for (size_t i = 0; i < count && i < 16; i++) {
+    /* Rows 14–25: Actor entries */
+    size_t max_display = 12;
+    if (count > max_display) count = max_display;
+
+    for (size_t i = 0; i < count; i++) {
+        int row = 14 + (int)i;
+        if (row >= 26) break;
+        int m = (int)s_margin[row];
+
         char name_buf[48];
         size_t nlen = actor_reverse_lookup_all(rt, actors[i].id,
                                                name_buf, sizeof(name_buf));
         if (nlen == 0)
             snprintf(name_buf, sizeof(name_buf), "(anon)");
 
-        char line[64];
         const char *status = "???";
         switch (actors[i].status) {
         case ACTOR_IDLE:    status = "idle"; break;
@@ -179,20 +227,24 @@ static void render_frame(runtime_t *rt) {
         case ACTOR_RUNNING: status = "run";  break;
         case ACTOR_STOPPED: status = "stop"; break;
         }
-        snprintf(line, sizeof(line), " %3u %-4s %s",
+
+        snprintf(tmp, sizeof(tmp), " %3u %-4s %s",
                  (unsigned)actor_id_seq(actors[i].id), status, name_buf);
-        display_text(rt, 0, DISPLAY_ROW(10 + (uint16_t)i),
-                     COLOR_TEXT, COLOR_BG, line);
+        mk_console_printf(rt, "\033[%d;%dH\033[37m%s\033[K\033[0m",
+                       row + 1, m + 1, tmp);
     }
 
-    /* Clear remaining actor rows */
-    for (size_t i = count; i < 16; i++) {
-        display_fill_rect(rt, 0, DISPLAY_ROW(10 + (uint16_t)i),
-                          466, 16, COLOR_BG);
+    /* Clear stale actor rows from previous frame */
+    for (size_t i = count; i < ds->prev_actor_count; i++) {
+        int row = 14 + (int)i;
+        if (row >= 26) break;
+        int m = (int)s_margin[row];
+        mk_console_printf(rt, "\033[%d;%dH\033[K", row + 1, m + 1);
     }
+    ds->prev_actor_count = count;
 }
 
-/* ── Dashboard behavior ───────────────────────────────────────────── */
+/* ── Dashboard behavior ───────────────────────────────────────────────── */
 
 static bool dashboard_behavior(runtime_t *rt, actor_t *self,
                                 message_t *msg, void *state) {
@@ -201,13 +253,13 @@ static bool dashboard_behavior(runtime_t *rt, actor_t *self,
 
     switch (msg->type) {
     case 1: /* bootstrap */
-        display_clear_screen(rt);
-        render_frame(rt);
+        mk_console_clear(rt);
+        render_frame(rt, ds);
         ds->timer_id = actor_set_timer(rt, 1000, true);
         break;
 
     case MSG_TIMER:
-        render_frame(rt);
+        render_frame(rt, ds);
         break;
 
     default:
@@ -217,18 +269,18 @@ static bool dashboard_behavior(runtime_t *rt, actor_t *self,
     return true;
 }
 
-/* ── Cleanup ──────────────────────────────────────────────────────── */
+/* ── Cleanup ──────────────────────────────────────────────────────────── */
 
 static void dashboard_state_free(void *state) {
     free(state);
 }
 
-/* ── Init ─────────────────────────────────────────────────────────── */
+/* ── Init ─────────────────────────────────────────────────────────────── */
 
 actor_id_t dashboard_actor_init(runtime_t *rt) {
-    /* Verify display actor exists */
-    actor_id_t display_id = actor_lookup(rt, "/node/hardware/display");
-    if (display_id == ACTOR_ID_INVALID)
+    /* Verify console actor exists (which in turn requires display) */
+    actor_id_t console_id = actor_lookup(rt, "/sys/console");
+    if (console_id == ACTOR_ID_INVALID)
         return ACTOR_ID_INVALID;
 
     dashboard_state_t *ds = calloc(1, sizeof(*ds));

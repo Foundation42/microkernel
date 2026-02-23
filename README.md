@@ -5,6 +5,9 @@ trees, Go-style blocking concurrency via WASM fibers, and sandboxed actor isolat
 via WAMR. All communication is asynchronous message passing over a cooperative
 scheduler with integrated I/O polling.
 
+![AMOLED Console Dashboard](docs/AMOLEDConsole.jpg)
+*System dashboard on Waveshare ESP32-S3 AMOLED 1.43" — 14 actors, ANSI console with circular bezel layout*
+
 ## Features
 
 - **Actor model** -- message passing, mailboxes, cooperative round-robin scheduling
@@ -26,6 +29,7 @@ scheduler with integrated I/O polling.
 - **Hot code reload** -- atomic WASM module swap preserving names, mailbox, and supervisor state; shell `reload` command
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
+- **Display + ANSI console** -- 466x466 AMOLED (SH8601) via QSPI with 8x16 font rendering, virtual terminal (58x29 grid) with ANSI escape sequence parsing, dirty-row tracking, and circular bezel margin layout; system dashboard shows node info, memory bars, and live actor list
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, and interactive shell
@@ -38,7 +42,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-39 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+43 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules and optionally `wat2wasm` (from wabt) for zero-linear-memory WAT modules.
 The WAMR submodule auto-initializes on first build.
@@ -403,13 +407,13 @@ to decode the hex string into a binary payload instead of sending it as text.
 include/microkernel/    Public headers (types, runtime, actor, message, services,
                         transport, http, mk_socket, mk_readline, shell,
                         supervision, wasm_actor, namespace, cf_proxy,
-                        gpio, i2c, pwm, led)
+                        gpio, i2c, pwm, led, display, console, dashboard)
 src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, hot reload, namespace,
                         cf_proxy, local_kv, state_persist, shell, readline,
                         hardware actors, HAL interfaces + Linux mocks,
                         wire format, utilities)
-tests/                  39 unit/integration tests + realworld tests + benchmarks
+tests/                  43 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (C and WAT)
 tools/shell/            Shell driver (C console actor + mk-shell binary)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)

@@ -162,6 +162,52 @@ static void handle_text(runtime_t *rt, message_t *msg, display_state_t *ds) {
     actor_send(rt, msg->source, MSG_DISPLAY_OK, NULL, 0);
 }
 
+/* ── Per-cell colored text rendering ──────────────────────────────── */
+
+static void handle_text_attr(runtime_t *rt, message_t *msg, display_state_t *ds) {
+    if (msg->payload_size < sizeof(display_text_attr_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+
+    const display_text_attr_payload_t *req =
+        (const display_text_attr_payload_t *)msg->payload;
+
+    size_t expected = sizeof(display_text_attr_payload_t) +
+                      (size_t)req->count * sizeof(display_text_attr_cell_t);
+    if (msg->payload_size < expected || req->count == 0) {
+        reply_error(rt, msg->source, "invalid cell count");
+        return;
+    }
+
+    uint16_t dw = display_hal_width();
+    uint16_t dh = display_hal_height();
+
+    if (req->y >= dh) return;  /* off-screen row — silently ignore */
+
+    /* Render each cell into row_buf */
+    uint16_t render_w = req->count * FONT_WIDTH;
+    if (req->x + render_w > dw)
+        render_w = dw - req->x;
+
+    uint16_t cells_to_render = render_w / FONT_WIDTH;
+    if (cells_to_render == 0) return;
+
+    /* Fill row_buf with per-cell characters */
+    for (uint16_t i = 0; i < cells_to_render; i++) {
+        text_render_char(&ds->row_buf[i * FONT_WIDTH], render_w,
+                         (char)req->cells[i].ch,
+                         req->cells[i].fg, req->cells[i].bg);
+    }
+
+    uint16_t draw_h = FONT_HEIGHT;
+    if (req->y + draw_h > dh)
+        draw_h = dh - req->y;
+
+    display_hal_draw(req->x, req->y, render_w, draw_h,
+                     (const uint8_t *)ds->row_buf);
+}
+
 /* ── Actor behavior ───────────────────────────────────────────────── */
 
 static bool display_behavior(runtime_t *rt, actor_t *self,
@@ -175,7 +221,8 @@ static bool display_behavior(runtime_t *rt, actor_t *self,
     case MSG_DISPLAY_CLEAR:      handle_clear(rt, msg);      break;
     case MSG_DISPLAY_BRIGHTNESS: handle_brightness(rt, msg); break;
     case MSG_DISPLAY_POWER:      handle_power(rt, msg);      break;
-    case MSG_DISPLAY_TEXT:       handle_text(rt, msg, ds);    break;
+    case MSG_DISPLAY_TEXT:       handle_text(rt, msg, ds);       break;
+    case MSG_DISPLAY_TEXT_ATTR:  handle_text_attr(rt, msg, ds);  break;
     default: break;
     }
 

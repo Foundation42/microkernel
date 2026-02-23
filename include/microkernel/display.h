@@ -42,6 +42,21 @@ typedef struct {
     char     text[];     /* null-terminated */
 } display_text_payload_t;
 
+/* Per-cell colored text (sent by console actor, one per dirty row) */
+typedef struct {
+    uint8_t  ch;
+    uint8_t  _pad;
+    uint16_t fg;         /* RGB565 */
+    uint16_t bg;         /* RGB565 */
+} display_text_attr_cell_t;  /* 6 bytes */
+
+typedef struct {
+    uint16_t x, y;       /* pixel position */
+    uint16_t count;      /* number of cells */
+    uint16_t _pad;
+    display_text_attr_cell_t cells[];
+} display_text_attr_payload_t;
+
 /* ── Character grid helpers ─────────────────────────────────────────── */
 
 /* 8px wide, 16px tall glyphs */

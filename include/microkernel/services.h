@@ -88,9 +88,15 @@
 #define MSG_DISPLAY_BRIGHTNESS ((msg_type_t)0xFF000054)
 #define MSG_DISPLAY_POWER      ((msg_type_t)0xFF000055)
 #define MSG_DISPLAY_TEXT       ((msg_type_t)0xFF000056)
-/* 0xFF000057–0xFF00005B reserved for display extensions */
+#define MSG_DISPLAY_TEXT_ATTR  ((msg_type_t)0xFF000057)
+/* 0xFF000058–0xFF00005B reserved for display extensions */
 #define MSG_DISPLAY_OK         ((msg_type_t)0xFF00005C)
 #define MSG_DISPLAY_ERROR      ((msg_type_t)0xFF00005D)
+
+/* Phase 26: Console actor */
+#define MSG_CONSOLE_WRITE      ((msg_type_t)0xFF000060)
+#define MSG_CONSOLE_CLEAR      ((msg_type_t)0xFF000061)
+/* 0xFF000062–0xFF00006F reserved for console extensions */
 
 /* ── Timer payload ─────────────────────────────────────────────────── */
 

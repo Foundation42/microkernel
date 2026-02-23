@@ -35,6 +35,7 @@ add_library(microkernel STATIC
     display_actor.c
     display_hal_linux.c
     text_render.c
+    console_actor.c
     dashboard_actor.c
     shell_actor.c
     mk_readline.c

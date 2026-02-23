@@ -31,6 +31,7 @@ idf_component_register(
         "${MK_SRC_DIR}/pwm_actor.c"
         "${MK_SRC_DIR}/led_actor.c"
         "${MK_SRC_DIR}/display_actor.c"
+        "${MK_SRC_DIR}/console_actor.c"
         "${MK_SRC_DIR}/text_render.c"
         "${MK_SRC_DIR}/dashboard_actor.c"
         "${MK_SRC_DIR}/shell_actor.c"
