@@ -23,6 +23,11 @@ CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+# Move instructions and rodata to PSRAM to free internal RAM for bounce buffers.
+# 64-byte cache line reduces PSRAM access overhead for RGB LCD DMA.
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
 # WAMR configuration: fast interpreter only, no WASI/pthread (saves RAM)
 CONFIG_WAMR_ENABLE_AOT=n

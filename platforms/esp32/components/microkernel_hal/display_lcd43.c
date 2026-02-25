@@ -140,7 +140,9 @@ bool display_hal_init(void) {
     esp_lcd_rgb_panel_config_t panel_cfg = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
-            .pclk_hz = 16 * 1000 * 1000,
+            /* ~29 Hz refresh — reduced from 16 MHz (39 Hz) to leave PSRAM
+             * bandwidth headroom for WiFi/TLS bursts (WSS keepalive etc). */
+            .pclk_hz = 12 * 1000 * 1000,
             .h_res = DISPLAY_WIDTH,
             .v_res = DISPLAY_HEIGHT,
             .hsync_pulse_width = 4,
@@ -153,6 +155,7 @@ bool display_hal_init(void) {
         },
         .data_width = 16,
         .num_fbs = 1,
+        .bounce_buffer_size_px = DISPLAY_WIDTH * 10,
         .psram_trans_align = 64,
         .sram_trans_align = 4,
         .hsync_gpio_num = PIN_HSYNC,

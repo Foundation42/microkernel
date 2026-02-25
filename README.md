@@ -8,6 +8,9 @@ scheduler with integrated I/O polling.
 ![AMOLED Console Dashboard](docs/AMOLEDConsole.jpg)
 *System dashboard on Waveshare ESP32-S3 AMOLED 1.43" — 14 actors, ANSI console with circular bezel layout*
 
+![LCD 4.3B Console Dashboard](docs/ESP32-S3-Touch-LCD-4.3B.jpg)
+*Same dashboard on Waveshare ESP32-S3-Touch-LCD-4.3B — 800x480 RGB LCD, full-width 100-column layout*
+
 ## Features
 
 - **Actor model** -- message passing, mailboxes, cooperative round-robin scheduling
