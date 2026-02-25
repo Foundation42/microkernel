@@ -33,6 +33,7 @@ scheduler with integrated I/O polling.
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Display + ANSI console** -- multi-board display stack with HAL abstraction: 466x466 AMOLED (SH8601 QSPI) and 800x480 LCD (ST7262 RGB parallel); 8x16 font rendering, virtual terminal with dynamic grid sizing (58x29 or 100x30), ANSI escape sequence parsing, dirty-row tracking; dashboard auto-adapts layout (circular bezel margins vs full-width rectangular); board selected at build time via `idf.py menuconfig`
+- **MIDI** -- full MIDI actor for SC16IS752 UART-to-I2C bridge (31250 baud); interrupt-driven receive with byte parser (running status, SysEx, real-time interleaving), subscriber dispatch with channel/message filtering; MIDI monitor actor (human-readable traffic logging); arpeggiator actor (UP/DOWN/UPDOWN/RANDOM patterns, 1-4 octave range, BPM-driven 16th-note stepping, legato output, enable/disable)
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, display, and interactive shell
@@ -45,7 +46,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-43 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+46 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules and optionally `wat2wasm` (from wabt) for zero-linear-memory WAT modules.
 The WAMR submodule auto-initializes on first build.
@@ -381,6 +382,7 @@ hardware actors register under `/node/hardware/` in the namespace.
 | PWM | `/node/hardware/pwm` | LEDC (low-speed mode, 6 channels) |
 | LED | `/node/hardware/led` | `led_strip` component (RMT, WS2812) |
 | Display | `/node/hardware/display` | SH8601 QSPI or ST7262 RGB (board-selected) |
+| MIDI | `/node/hardware/midi` | SC16IS752 dual UART via I2C |
 
 **GPIO** supports digital read/write, configurable input/output modes, and
 interrupt-driven event subscriptions. Pin state changes are delivered as
@@ -416,19 +418,49 @@ decimal representations of `MSG_LED_CONFIGURE` (0xFF000040), `MSG_LED_SET_PIXEL`
 (0xFF000041), and `MSG_LED_SHOW` (0xFF000045). The `x:` prefix tells the shell
 to decode the hex string into a binary payload instead of sending it as text.
 
+### MIDI
+
+The MIDI actor drives an SC16IS752 dual UART-to-I2C bridge for standard
+MIDI IN/OUT at 31250 baud. Channel A handles receive (interrupt-driven via
+IRQ pin), Channel B handles transmit. The byte-level parser handles running
+status, SysEx accumulation (up to 256 bytes), and real-time message interleaving
+(clock/start/stop processed without disrupting parse state).
+
+Actors subscribe to MIDI events with optional channel and message-type filters:
+
+```c
+midi_subscribe_payload_t sub = {
+    .channel = 0xFF,            /* 0xFF = all channels */
+    .msg_filter = MIDI_FILTER_NOTE | MIDI_FILTER_CC
+};
+actor_send(rt, midi_id, MSG_MIDI_SUBSCRIBE, &sub, sizeof(sub));
+```
+
+Two higher-level actors build on the MIDI actor:
+
+- **MIDI Monitor** (`/sys/midi_monitor`) -- subscribes to all MIDI traffic and
+  prints human-readable output: note names with octaves, CC numbers, pitch bend
+  values, SysEx hex dumps
+- **Arpeggiator** (`/sys/arpeggiator`) -- holds notes from MIDI IN and generates
+  arpeggiated patterns on MIDI OUT. Supports UP, DOWN, UPDOWN (bounce without
+  endpoint repeat), and RANDOM patterns across 1-4 octaves. BPM-driven 16th-note
+  stepping with legato output (Note On before Note Off). Configurable via messages:
+  `MSG_ARP_SET_BPM`, `MSG_ARP_SET_PATTERN`, `MSG_ARP_SET_OCTAVES`, `MSG_ARP_ENABLE`
+
 ## Project structure
 
 ```
 include/microkernel/    Public headers (types, runtime, actor, message, services,
                         transport, http, mk_socket, mk_readline, shell,
                         supervision, wasm_actor, namespace, cf_proxy,
-                        gpio, i2c, pwm, led, display, console, dashboard)
+                        gpio, i2c, pwm, led, display, console, dashboard,
+                        midi, midi_monitor, arpeggiator)
 src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, hot reload, namespace,
                         cf_proxy, local_kv, state_persist, shell, readline,
-                        hardware actors, HAL interfaces + Linux mocks,
-                        wire format, utilities)
-tests/                  43 unit/integration tests + realworld tests + benchmarks
+                        hardware actors, MIDI actor + monitor + arpeggiator,
+                        HAL interfaces + Linux mocks, wire format, utilities)
+tests/                  46 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (C and WAT)
 tools/shell/            Shell driver (C console actor + mk-shell binary)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)

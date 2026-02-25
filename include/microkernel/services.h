@@ -104,7 +104,11 @@
 #define MSG_MIDI_SEND_SYSEX    ((msg_type_t)0xFF000072)
 #define MSG_MIDI_SUBSCRIBE     ((msg_type_t)0xFF000073)
 #define MSG_MIDI_UNSUBSCRIBE   ((msg_type_t)0xFF000074)
-/* 0xFF000075–0xFF000079 reserved for MIDI extensions */
+/* Phase 28: MIDI extensions — Arpeggiator */
+#define MSG_ARP_SET_BPM       ((msg_type_t)0xFF000075)
+#define MSG_ARP_SET_PATTERN   ((msg_type_t)0xFF000076)
+#define MSG_ARP_SET_OCTAVES   ((msg_type_t)0xFF000077)
+#define MSG_ARP_ENABLE        ((msg_type_t)0xFF000078)
 #define MSG_MIDI_OK            ((msg_type_t)0xFF00007A)
 #define MSG_MIDI_ERROR         ((msg_type_t)0xFF00007B)
 #define MSG_MIDI_EVENT         ((msg_type_t)0xFF00007C)

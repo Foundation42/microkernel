@@ -49,6 +49,8 @@ add_microkernel_test(test_display_text)
 add_microkernel_test(test_console)
 add_microkernel_test(test_dashboard)
 add_microkernel_test(test_midi)
+add_microkernel_test(test_midi_monitor)
+add_microkernel_test(test_arpeggiator)
 
 # Phase 12: WASM actor test
 if(HAVE_WASM)
