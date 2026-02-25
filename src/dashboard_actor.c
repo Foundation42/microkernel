@@ -26,6 +26,8 @@
 typedef struct {
     timer_id_t timer_id;
     size_t     prev_actor_count; /* track how many actor rows were drawn */
+    int        cols, rows;       /* console grid dimensions */
+    bool       circular;         /* true = AMOLED circular display */
 } dashboard_state_t;
 
 /* ── Circle margin table ──────────────────────────────────────────────── */
@@ -33,14 +35,23 @@ typedef struct {
    display. Based on circle geometry: radius=233px center at (233,233),
    font cell 8×16px → 58 cols × 29 rows. */
 
-static const uint8_t s_margin[CONSOLE_ROWS] = {
+static const uint8_t s_circle_margin[CONSOLE_ROWS] = {
     21, 16, 13, 10, 8, 6, 5, 3, 2, 2, 1, 0, 0, 0, 0,  /* rows 0-14 */
     0, 0, 0, 1, 2, 2, 3, 5, 6, 8, 10, 13, 16, 21        /* rows 15-28 */
 };
 
-/* Available columns at each row */
-static int avail_cols(int row) {
-    return CONSOLE_COLS - 2 * (int)s_margin[row];
+/* Get left margin for a given row */
+static int row_margin(const dashboard_state_t *ds, int row) {
+    if (!ds->circular)
+        return 0;
+    if (row < 0 || row >= CONSOLE_ROWS)
+        return 0;
+    return (int)s_circle_margin[row];
+}
+
+/* Available columns at a given row */
+static int avail_cols(const dashboard_state_t *ds, int row) {
+    return ds->cols - 2 * row_margin(ds, row);
 }
 
 /* ── Uptime ───────────────────────────────────────────────────────────── */
@@ -59,8 +70,9 @@ static uint64_t get_uptime_ms(void) {
 
 #ifdef ESP_PLATFORM
 static void render_memory_bar(runtime_t *rt, int row, int margin,
+                              int total_cols,
                               const char *label, size_t used, size_t total) {
-    int cols = CONSOLE_COLS - 2 * margin;
+    int cols = total_cols - 2 * margin;
     if (cols < 20) return;
 
     /* Build entire bar as one string to avoid per-char messages.
@@ -114,8 +126,8 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
 
     /* Row 3: Header — centered "MICROKERNEL" in bright cyan */
     {
-        int m = (int)s_margin[3];
-        int cols = avail_cols(3);
+        int m = row_margin(ds, 3);
+        int cols = avail_cols(ds, 3);
         int pad = (cols - 13) / 2;
         if (pad < 0) pad = 0;
         mk_console_printf(rt, "\033[4;%dH%*s\033[96m MICROKERNEL \033[0m\033[K",
@@ -124,7 +136,7 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
 
     /* Row 5: Node info */
     {
-        int m = (int)s_margin[5];
+        int m = row_margin(ds, 5);
         snprintf(tmp, sizeof(tmp), " node: %-16s id: %u",
                  mk_node_identity(), (unsigned)mk_node_id());
         mk_console_printf(rt, "\033[6;%dH\033[37m%s\033[K\033[0m", m + 1, tmp);
@@ -132,7 +144,7 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
 
     /* Row 6: IP address */
     {
-        int m = (int)s_margin[6];
+        int m = row_margin(ds, 6);
 #if defined(ESP_PLATFORM) && SOC_WIFI_SUPPORTED
         esp_netif_ip_info_t ip_info;
         esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -151,7 +163,7 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
 
     /* Row 7: Uptime */
     {
-        int m = (int)s_margin[7];
+        int m = row_margin(ds, 7);
         uint64_t ms = get_uptime_ms();
         uint32_t secs = (uint32_t)(ms / 1000);
         uint32_t mins = secs / 60;
@@ -164,7 +176,7 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
 
     /* Row 9: Memory heading */
     {
-        int m = (int)s_margin[9];
+        int m = row_margin(ds, 9);
         mk_console_printf(rt, "\033[10;%dH\033[96m MEMORY\033[K\033[0m", m + 1);
     }
 
@@ -174,22 +186,24 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
         size_t dram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         size_t dram_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
         size_t dram_used = dram_total - dram_free;
-        render_memory_bar(rt, 10, (int)s_margin[10], "DRAM", dram_used, dram_total);
+        render_memory_bar(rt, 10, row_margin(ds, 10), ds->cols,
+                          "DRAM", dram_used, dram_total);
 
         size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
         if (psram_total > 0) {
             size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
             size_t psram_used = psram_total - psram_free;
-            render_memory_bar(rt, 11, (int)s_margin[11], "PSRAM", psram_used, psram_total);
+            render_memory_bar(rt, 11, row_margin(ds, 11), ds->cols,
+                              "PSRAM", psram_used, psram_total);
         } else {
             mk_console_printf(rt, "\033[12;%dH\033[90m PSRAM  N/A\033[K\033[0m",
-                           (int)s_margin[11] + 1);
+                           row_margin(ds, 11) + 1);
         }
     }
 #else
     {
-        int m10 = (int)s_margin[10];
-        int m11 = (int)s_margin[11];
+        int m10 = row_margin(ds, 10);
+        int m11 = row_margin(ds, 11);
         mk_console_printf(rt, "\033[11;%dH\033[90m DRAM   (linux host)\033[K\033[0m", m10 + 1);
         mk_console_printf(rt, "\033[12;%dH\033[90m PSRAM  N/A\033[K\033[0m", m11 + 1);
     }
@@ -200,19 +214,21 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
     size_t count = runtime_actor_info(rt, actors, MAX_DASHBOARD_ACTORS);
 
     {
-        int m = (int)s_margin[13];
+        int m = row_margin(ds, 13);
         snprintf(tmp, sizeof(tmp), " ACTORS (%zu)", count);
         mk_console_printf(rt, "\033[14;%dH\033[96m%s\033[K\033[0m", m + 1, tmp);
     }
 
-    /* Rows 14–25: Actor entries */
-    size_t max_display = 12;
+    /* Rows 14–(rows-3): Actor entries */
+    int max_actor_row = ds->rows - 3;  /* leave 3 rows at bottom */
+    size_t max_display = (size_t)(max_actor_row > 14 ? max_actor_row - 14 : 0);
+    if (max_display > MAX_DASHBOARD_ACTORS) max_display = MAX_DASHBOARD_ACTORS;
     if (count > max_display) count = max_display;
 
     for (size_t i = 0; i < count; i++) {
         int row = 14 + (int)i;
-        if (row >= 26) break;
-        int m = (int)s_margin[row];
+        if (row >= max_actor_row) break;
+        int m = row_margin(ds, row);
 
         char name_buf[48];
         size_t nlen = actor_reverse_lookup_all(rt, actors[i].id,
@@ -237,8 +253,8 @@ static void render_frame(runtime_t *rt, dashboard_state_t *ds) {
     /* Clear stale actor rows from previous frame */
     for (size_t i = count; i < ds->prev_actor_count; i++) {
         int row = 14 + (int)i;
-        if (row >= 26) break;
-        int m = (int)s_margin[row];
+        if (row >= max_actor_row) break;
+        int m = row_margin(ds, row);
         mk_console_printf(rt, "\033[%d;%dH\033[K", row + 1, m + 1);
     }
     ds->prev_actor_count = count;
@@ -286,6 +302,14 @@ actor_id_t dashboard_actor_init(runtime_t *rt) {
     dashboard_state_t *ds = calloc(1, sizeof(*ds));
     if (!ds)
         return ACTOR_ID_INVALID;
+
+    /* Query console dimensions to adapt layout */
+    if (!mk_console_get_size(&ds->cols, &ds->rows)) {
+        ds->cols = CONSOLE_COLS;
+        ds->rows = CONSOLE_ROWS;
+    }
+    /* Circular display: AMOLED 1.43" has cols <= 58 */
+    ds->circular = (ds->cols <= 58);
 
     actor_id_t id = actor_spawn(rt, dashboard_behavior, ds,
                                 dashboard_state_free, 32);

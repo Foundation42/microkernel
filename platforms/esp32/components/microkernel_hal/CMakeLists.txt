@@ -7,6 +7,15 @@ elseif(CONFIG_IDF_TARGET_ARCH_RISCV)
     set(FIBER_REQUIRES "")
 endif()
 
+# Select display HAL based on board choice
+if(CONFIG_MK_BOARD_LCD43B)
+    set(DISPLAY_SRC "display_lcd43.c")
+    set(DISPLAY_REQUIRES "")
+else()
+    set(DISPLAY_SRC "display_esp32.c")
+    set(DISPLAY_REQUIRES "")
+endif()
+
 idf_component_register(
     SRCS
         "timer_esp32.c"
@@ -15,7 +24,7 @@ idf_component_register(
         "i2c_esp32.c"
         "pwm_esp32.c"
         "led_esp32.c"
-        "display_esp32.c"
+        ${DISPLAY_SRC}
         ${FIBER_SRCS}
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS

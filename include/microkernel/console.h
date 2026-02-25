@@ -14,10 +14,14 @@
  */
 
 /* ── Console grid dimensions ─────────────────────────────────────────── */
-/* 466 / 8 = 58 columns, 466 / 16 = 29 rows */
+/* Default: 466 / 8 = 58 columns, 466 / 16 = 29 rows (AMOLED 1.43")
+ * Actual dimensions are computed at runtime from display size.
+ * Max: 800 / 8 = 100 columns, 480 / 16 = 30 rows (LCD 4.3B) */
 
-#define CONSOLE_COLS 58
-#define CONSOLE_ROWS 29
+#define CONSOLE_COLS     58
+#define CONSOLE_ROWS     29
+#define CONSOLE_MAX_COLS 100
+#define CONSOLE_MAX_ROWS 32
 
 /* ── Cell structure ──────────────────────────────────────────────────── */
 
@@ -47,6 +51,10 @@ bool mk_console_printf(runtime_t *rt, const char *fmt, ...)
 
 /* Clear the console screen and home cursor. */
 bool mk_console_clear(runtime_t *rt);
+
+/* Get actual console dimensions (may differ from CONSOLE_COLS/ROWS).
+   Returns true if the console is initialized. */
+bool mk_console_get_size(int *cols, int *rows);
 
 /* ── Test helpers (Linux only) ───────────────────────────────────────── */
 

@@ -1,0 +1,12 @@
+menu "Microkernel Board"
+    choice MK_BOARD
+        prompt "Target board"
+        default MK_BOARD_AMOLED143
+
+        config MK_BOARD_AMOLED143
+            bool "Waveshare AMOLED 1.43 (466x466 SH8601)"
+
+        config MK_BOARD_LCD43B
+            bool "Waveshare LCD 4.3B (800x480 ST7262)"
+    endchoice
+endmenu

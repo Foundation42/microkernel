@@ -253,12 +253,13 @@ actor_id_t display_actor_init(runtime_t *rt) {
     }
 
     ds->width = w;
-#ifdef ESP_PLATFORM
+#if defined(ESP_PLATFORM) && !defined(CONFIG_MK_BOARD_LCD43B)
     /* Force internal RAM — PSRAM buffers cause DMA cache coherency issues
        with the QSPI display controller (GDMA reads bypass D-Cache). */
     ds->row_buf = heap_caps_calloc((size_t)w * FONT_HEIGHT, sizeof(uint16_t),
                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 #else
+    /* Linux mock + RGB LCD (framebuffer in PSRAM, no DMA constraint) */
     ds->row_buf = calloc((size_t)w * FONT_HEIGHT, sizeof(uint16_t));
 #endif
     if (!ds->row_buf) {

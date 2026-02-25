@@ -4,6 +4,7 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/display.h"
+#include "display_hal.h"
 #include "text_render.h"
 #include <stdio.h>
 #include <string.h>
@@ -17,10 +18,11 @@ enum { ST_NORMAL, ST_ESC, ST_CSI };
 /* ── Console state ───────────────────────────────────────────────────── */
 
 typedef struct {
-    console_cell_t grid[CONSOLE_ROWS][CONSOLE_COLS];
+    console_cell_t *grid;       /* heap-allocated [rows][cols] */
+    uint16_t cols, rows;        /* actual dimensions from display */
     uint16_t crow, ccol;        /* cursor position (0-based) */
     uint16_t cur_fg, cur_bg;    /* active ANSI color state */
-    uint32_t dirty;             /* bitmask of dirty rows (29 bits) */
+    uint32_t dirty;             /* bitmask of dirty rows (max 32 bits) */
     bool bold;                  /* bold = use bright color variant */
     /* ANSI parser FSM */
     int pstate;
@@ -59,44 +61,49 @@ static void init_palette(uint16_t *pal) {
 #define DEFAULT_FG_IDX 7
 #define DEFAULT_BG_IDX 0
 
+/* Grid access: grid is a flat array of [rows * cols] cells */
+#define CELL(cs, r, c) ((cs)->grid[(r) * (cs)->cols + (c)])
+
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static void clear_grid(console_state_t *cs) {
-    for (int r = 0; r < CONSOLE_ROWS; r++) {
-        for (int c = 0; c < CONSOLE_COLS; c++) {
-            cs->grid[r][c].ch = ' ';
-            cs->grid[r][c]._pad = 0;
-            cs->grid[r][c].fg = cs->palette[DEFAULT_FG_IDX];
-            cs->grid[r][c].bg = cs->palette[DEFAULT_BG_IDX];
+    for (int r = 0; r < cs->rows; r++) {
+        for (int c = 0; c < cs->cols; c++) {
+            CELL(cs, r, c).ch = ' ';
+            CELL(cs, r, c)._pad = 0;
+            CELL(cs, r, c).fg = cs->palette[DEFAULT_FG_IDX];
+            CELL(cs, r, c).bg = cs->palette[DEFAULT_BG_IDX];
         }
     }
-    cs->dirty = (uint32_t)((1u << CONSOLE_ROWS) - 1);
+    cs->dirty = (uint32_t)((1u << cs->rows) - 1);
 }
 
 static void scroll_up(console_state_t *cs) {
-    memmove(&cs->grid[0], &cs->grid[1],
-            (CONSOLE_ROWS - 1) * sizeof(cs->grid[0]));
+    size_t row_bytes = (size_t)cs->cols * sizeof(console_cell_t);
+    memmove(&cs->grid[0], &cs->grid[cs->cols],
+            (size_t)(cs->rows - 1) * row_bytes);
     /* Clear last row */
-    for (int c = 0; c < CONSOLE_COLS; c++) {
-        cs->grid[CONSOLE_ROWS - 1][c].ch = ' ';
-        cs->grid[CONSOLE_ROWS - 1][c]._pad = 0;
-        cs->grid[CONSOLE_ROWS - 1][c].fg = cs->palette[DEFAULT_FG_IDX];
-        cs->grid[CONSOLE_ROWS - 1][c].bg = cs->palette[DEFAULT_BG_IDX];
+    int last = cs->rows - 1;
+    for (int c = 0; c < cs->cols; c++) {
+        CELL(cs, last, c).ch = ' ';
+        CELL(cs, last, c)._pad = 0;
+        CELL(cs, last, c).fg = cs->palette[DEFAULT_FG_IDX];
+        CELL(cs, last, c).bg = cs->palette[DEFAULT_BG_IDX];
     }
-    cs->crow = CONSOLE_ROWS - 1;
-    cs->dirty = (uint32_t)((1u << CONSOLE_ROWS) - 1);
+    cs->crow = (uint16_t)last;
+    cs->dirty = (uint32_t)((1u << cs->rows) - 1);
 }
 
 static void put_char(console_state_t *cs, uint8_t ch) {
-    if (cs->ccol >= CONSOLE_COLS) {
+    if (cs->ccol >= cs->cols) {
         /* Wrap to next line */
         cs->ccol = 0;
         cs->crow++;
-        if (cs->crow >= CONSOLE_ROWS)
+        if (cs->crow >= cs->rows)
             scroll_up(cs);
     }
 
-    console_cell_t *cell = &cs->grid[cs->crow][cs->ccol];
+    console_cell_t *cell = &CELL(cs, cs->crow, cs->ccol);
     uint16_t fg = cs->cur_fg;
     uint16_t bg = cs->cur_bg;
 
@@ -149,8 +156,8 @@ static void dispatch_csi(console_state_t *cs, char final) {
     case 'f': {
         int row = (p0 > 0 ? p0 : 1) - 1;
         int col = (p1 > 0 ? p1 : 1) - 1;
-        if (row >= CONSOLE_ROWS) row = CONSOLE_ROWS - 1;
-        if (col >= CONSOLE_COLS) col = CONSOLE_COLS - 1;
+        if (row >= cs->rows) row = cs->rows - 1;
+        if (col >= cs->cols) col = cs->cols - 1;
         cs->crow = (uint16_t)row;
         cs->ccol = (uint16_t)col;
         break;
@@ -161,13 +168,13 @@ static void dispatch_csi(console_state_t *cs, char final) {
         break;
     case 'B': /* Cursor down */
         if (p0 == 0) p0 = 1;
-        cs->crow = (uint16_t)(cs->crow + p0 >= CONSOLE_ROWS ?
-                    CONSOLE_ROWS - 1 : cs->crow + p0);
+        cs->crow = (uint16_t)(cs->crow + p0 >= cs->rows ?
+                    cs->rows - 1 : cs->crow + p0);
         break;
     case 'C': /* Cursor forward */
         if (p0 == 0) p0 = 1;
-        cs->ccol = (uint16_t)(cs->ccol + p0 >= CONSOLE_COLS ?
-                    CONSOLE_COLS - 1 : cs->ccol + p0);
+        cs->ccol = (uint16_t)(cs->ccol + p0 >= cs->cols ?
+                    cs->cols - 1 : cs->ccol + p0);
         break;
     case 'D': /* Cursor back */
         if (p0 == 0) p0 = 1;
@@ -183,10 +190,10 @@ static void dispatch_csi(console_state_t *cs, char final) {
     case 'K': /* Erase in line */
         if (p0 == 0) {
             /* Clear from cursor to end of line */
-            for (int c = cs->ccol; c < CONSOLE_COLS; c++) {
-                cs->grid[cs->crow][c].ch = ' ';
-                cs->grid[cs->crow][c].fg = cs->palette[DEFAULT_FG_IDX];
-                cs->grid[cs->crow][c].bg = cs->palette[DEFAULT_BG_IDX];
+            for (int c = cs->ccol; c < cs->cols; c++) {
+                CELL(cs, cs->crow, c).ch = ' ';
+                CELL(cs, cs->crow, c).fg = cs->palette[DEFAULT_FG_IDX];
+                CELL(cs, cs->crow, c).bg = cs->palette[DEFAULT_BG_IDX];
             }
             cs->dirty |= (1u << cs->crow);
         }
@@ -217,14 +224,14 @@ static void console_feed(console_state_t *cs, const uint8_t *data, size_t len) {
             } else if (ch == '\n') {
                 cs->crow++;
                 cs->ccol = 0;
-                if (cs->crow >= CONSOLE_ROWS)
+                if (cs->crow >= cs->rows)
                     scroll_up(cs);
             } else if (ch == '\r') {
                 cs->ccol = 0;
             } else if (ch == '\t') {
                 cs->ccol = (uint16_t)((cs->ccol + 8) & ~7);
-                if (cs->ccol >= CONSOLE_COLS)
-                    cs->ccol = CONSOLE_COLS - 1;
+                if (cs->ccol >= cs->cols)
+                    cs->ccol = cs->cols - 1;
             } else if (ch == '\b') {
                 if (cs->ccol > 0)
                     cs->ccol--;
@@ -269,27 +276,27 @@ static void console_feed(console_state_t *cs, const uint8_t *data, size_t len) {
 static void flush_dirty(runtime_t *rt, console_state_t *cs) {
     if (cs->dirty == 0) return;
 
-    for (int row = 0; row < CONSOLE_ROWS; row++) {
+    for (int row = 0; row < cs->rows; row++) {
         if (!(cs->dirty & (1u << row))) continue;
 
         size_t payload_size = sizeof(display_text_attr_payload_t) +
-                              (size_t)CONSOLE_COLS * sizeof(display_text_attr_cell_t);
+                              (size_t)cs->cols * sizeof(display_text_attr_cell_t);
 
-        /* Stack buffer: header (8) + 58 cells × 6 = 356 bytes */
+        /* Stack buffer sized for max cols: header (8) + 100 cells × 6 = 608 bytes */
         uint8_t buf[sizeof(display_text_attr_payload_t) +
-                     CONSOLE_COLS * sizeof(display_text_attr_cell_t)];
+                     CONSOLE_MAX_COLS * sizeof(display_text_attr_cell_t)];
 
         display_text_attr_payload_t *p = (display_text_attr_payload_t *)buf;
         p->x = DISPLAY_COL(0);
         p->y = DISPLAY_ROW(row);
-        p->count = CONSOLE_COLS;
+        p->count = cs->cols;
         p->_pad = 0;
 
-        for (int c = 0; c < CONSOLE_COLS; c++) {
-            p->cells[c].ch = cs->grid[row][c].ch;
+        for (int c = 0; c < cs->cols; c++) {
+            p->cells[c].ch = CELL(cs, row, c).ch;
             p->cells[c]._pad = 0;
-            p->cells[c].fg = cs->grid[row][c].fg;
-            p->cells[c].bg = cs->grid[row][c].bg;
+            p->cells[c].fg = CELL(cs, row, c).fg;
+            p->cells[c].bg = CELL(cs, row, c).bg;
         }
 
         actor_send_named(rt, "/node/hardware/display",
@@ -331,11 +338,13 @@ static bool console_behavior(runtime_t *rt, actor_t *self,
 /* ── Cleanup ─────────────────────────────────────────────────────────── */
 
 static void console_state_free(void *state) {
+    console_state_t *cs = state;
 #ifndef ESP_PLATFORM
     if (s_test_state == state)
         s_test_state = NULL;
 #endif
-    free(state);
+    free(cs->grid);
+    free(cs);
 }
 
 /* ── Init ────────────────────────────────────────────────────────────── */
@@ -350,22 +359,38 @@ actor_id_t mk_console_actor_init(runtime_t *rt) {
     if (!cs)
         return ACTOR_ID_INVALID;
 
+    /* Compute grid dimensions from display size */
+    uint16_t dw = display_hal_width();
+    uint16_t dh = display_hal_height();
+    cs->cols = dw / FONT_WIDTH;
+    cs->rows = dh / FONT_HEIGHT;
+    if (cs->cols > CONSOLE_MAX_COLS) cs->cols = CONSOLE_MAX_COLS;
+    if (cs->rows > CONSOLE_MAX_ROWS) cs->rows = CONSOLE_MAX_ROWS;
+
+    /* Allocate grid */
+    cs->grid = calloc((size_t)cs->rows * cs->cols, sizeof(console_cell_t));
+    if (!cs->grid) {
+        free(cs);
+        return ACTOR_ID_INVALID;
+    }
+
     init_palette(cs->palette);
     cs->cur_fg = cs->palette[DEFAULT_FG_IDX];
     cs->cur_bg = cs->palette[DEFAULT_BG_IDX];
 
     /* Initialize grid with spaces */
-    for (int r = 0; r < CONSOLE_ROWS; r++) {
-        for (int c = 0; c < CONSOLE_COLS; c++) {
-            cs->grid[r][c].ch = ' ';
-            cs->grid[r][c].fg = cs->cur_fg;
-            cs->grid[r][c].bg = cs->cur_bg;
+    for (int r = 0; r < cs->rows; r++) {
+        for (int c = 0; c < cs->cols; c++) {
+            CELL(cs, r, c).ch = ' ';
+            CELL(cs, r, c).fg = cs->cur_fg;
+            CELL(cs, r, c).bg = cs->cur_bg;
         }
     }
 
     actor_id_t id = actor_spawn(rt, console_behavior, cs,
                                 console_state_free, 64);
     if (id == ACTOR_ID_INVALID) {
+        free(cs->grid);
         free(cs);
         return ACTOR_ID_INVALID;
     }
@@ -406,14 +431,38 @@ bool mk_console_clear(runtime_t *rt) {
                             MSG_CONSOLE_CLEAR, NULL, 0);
 }
 
+/* ── Size query ──────────────────────────────────────────────────────── */
+
+bool mk_console_get_size(int *cols, int *rows) {
+#ifndef ESP_PLATFORM
+    if (!s_test_state) return false;
+    if (cols) *cols = (int)s_test_state->cols;
+    if (rows) *rows = (int)s_test_state->rows;
+    return true;
+#else
+    /* On ESP32, query from display HAL directly (console may not be
+     * initialized yet when dashboard queries at startup). */
+    uint16_t dw = display_hal_width();
+    uint16_t dh = display_hal_height();
+    int c = dw / FONT_WIDTH;
+    int r = dh / FONT_HEIGHT;
+    if (c > CONSOLE_MAX_COLS) c = CONSOLE_MAX_COLS;
+    if (r > CONSOLE_MAX_ROWS) r = CONSOLE_MAX_ROWS;
+    if (cols) *cols = c;
+    if (rows) *rows = r;
+    return true;
+#endif
+}
+
 /* ── Test helpers (Linux only) ───────────────────────────────────────── */
 
 #ifndef ESP_PLATFORM
 const console_cell_t *mk_console_get_cell(int row, int col) {
     if (!s_test_state) return NULL;
-    if (row < 0 || row >= CONSOLE_ROWS || col < 0 || col >= CONSOLE_COLS)
+    if (row < 0 || row >= s_test_state->rows ||
+        col < 0 || col >= s_test_state->cols)
         return NULL;
-    return &s_test_state->grid[row][col];
+    return &CELL(s_test_state, row, col);
 }
 
 bool mk_console_get_cursor(int *row, int *col) {

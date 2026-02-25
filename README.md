@@ -29,10 +29,10 @@ scheduler with integrated I/O polling.
 - **Hot code reload** -- atomic WASM module swap preserving names, mailbox, and supervisor state; shell `reload` command
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
-- **Display + ANSI console** -- 466x466 AMOLED (SH8601) via QSPI with 8x16 font rendering, virtual terminal (58x29 grid) with ANSI escape sequence parsing, dirty-row tracking, and circular bezel margin layout; system dashboard shows node info, memory bars, and live actor list
+- **Display + ANSI console** -- multi-board display stack with HAL abstraction: 466x466 AMOLED (SH8601 QSPI) and 800x480 LCD (ST7262 RGB parallel); 8x16 font rendering, virtual terminal with dynamic grid sizing (58x29 or 100x30), ANSI escape sequence parsing, dirty-row tracking; dashboard auto-adapts layout (circular bezel margins vs full-width rectangular); board selected at build time via `idf.py menuconfig`
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
-- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, and interactive shell
+- **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, display, and interactive shell
 
 ## Building (Linux)
 
@@ -67,9 +67,20 @@ idf.py build flash monitor
 
 Runs 18 smoke tests on boot (6 on chips without WiFi). Tested on:
 
-- **ESP32-S3** (Xtensa) -- TinyS3, Waveshare -- 18 tests
+- **ESP32-S3** (Xtensa) -- TinyS3, Waveshare AMOLED 1.43", Waveshare LCD 4.3B -- 18 tests
 - **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit, C6-Zero -- 18 tests
 - **ESP32-P4** (RISC-V dual-core) -- ESP32-P4 -- 6 tests (no WiFi radio)
+
+For boards with displays, select the target board before building:
+
+```bash
+idf.py menuconfig  # → Microkernel Board → select your board
+```
+
+| Board | Display | Resolution | Interface |
+|---|---|---|---|
+| Waveshare AMOLED 1.43" | SH8601 | 466x466 | QSPI |
+| Waveshare LCD 4.3B | ST7262 | 800x480 | RGB parallel |
 
 The build system auto-selects the correct fiber implementation (Xtensa register
 window spill vs RISC-V direct stack switch) and compiles out WiFi-dependent
@@ -366,6 +377,7 @@ hardware actors register under `/node/hardware/` in the namespace.
 | I2C | `/node/hardware/i2c` | Legacy `driver/i2c.h` master API |
 | PWM | `/node/hardware/pwm` | LEDC (low-speed mode, 6 channels) |
 | LED | `/node/hardware/led` | `led_strip` component (RMT, WS2812) |
+| Display | `/node/hardware/display` | SH8601 QSPI or ST7262 RGB (board-selected) |
 
 **GPIO** supports digital read/write, configurable input/output modes, and
 interrupt-driven event subscriptions. Pin state changes are delivered as
