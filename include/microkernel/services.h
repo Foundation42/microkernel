@@ -98,6 +98,18 @@
 #define MSG_CONSOLE_CLEAR      ((msg_type_t)0xFF000061)
 /* 0xFF000062–0xFF00006F reserved for console extensions */
 
+/* Phase 28: MIDI actor */
+#define MSG_MIDI_CONFIGURE     ((msg_type_t)0xFF000070)
+#define MSG_MIDI_SEND          ((msg_type_t)0xFF000071)
+#define MSG_MIDI_SEND_SYSEX    ((msg_type_t)0xFF000072)
+#define MSG_MIDI_SUBSCRIBE     ((msg_type_t)0xFF000073)
+#define MSG_MIDI_UNSUBSCRIBE   ((msg_type_t)0xFF000074)
+/* 0xFF000075–0xFF000079 reserved for MIDI extensions */
+#define MSG_MIDI_OK            ((msg_type_t)0xFF00007A)
+#define MSG_MIDI_ERROR         ((msg_type_t)0xFF00007B)
+#define MSG_MIDI_EVENT         ((msg_type_t)0xFF00007C)
+#define MSG_MIDI_SYSEX_EVENT   ((msg_type_t)0xFF00007D)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {

@@ -39,6 +39,8 @@ add_library(microkernel STATIC
     dashboard_actor.c
     shell_actor.c
     mk_readline.c
+    midi_actor.c
+    midi_hal_linux.c
 )
 
 target_include_directories(microkernel PUBLIC
