@@ -12,6 +12,7 @@
 
 #include "display_hal.h"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
 #include <driver/i2c.h>
@@ -74,6 +75,19 @@ static esp_lcd_panel_handle_t s_panel;
 static bool s_initialized;
 static bool s_i2c_initialized;
 static bool s_backlight_on;
+
+/* GDMA stall detection: the LCD peripheral's DMA can hang after
+ * accumulated bounce buffer underflows (PSRAM contention from WiFi/TLS).
+ * We track the last VSYNC timestamp and restart the DMA if it stalls. */
+static volatile int64_t s_last_vsync_us;
+
+static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t panel,
+                                const esp_lcd_rgb_panel_event_data_t *edata,
+                                void *user_ctx) {
+    (void)panel; (void)edata; (void)user_ctx;
+    s_last_vsync_us = esp_timer_get_time();
+    return false;
+}
 
 /* ── CH422G helpers ───────────────────────────────────────────────── */
 
@@ -191,6 +205,13 @@ bool display_hal_init(void) {
         return false;
     }
 
+    /* Register VSYNC callback for GDMA stall detection */
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {
+        .on_vsync = on_vsync,
+    };
+    esp_lcd_rgb_panel_register_event_callbacks(s_panel, &cbs, NULL);
+    s_last_vsync_us = esp_timer_get_time();
+
     s_initialized = true;
     ESP_LOGI(TAG, "ST7262 RGB LCD initialized (%dx%d)", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     return true;
@@ -221,6 +242,15 @@ bool display_hal_draw(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
         return false;
     if (x + w > DISPLAY_WIDTH || y + h > DISPLAY_HEIGHT)
         return false;
+
+    /* Auto-restart GDMA if it has stalled (no VSYNC for >500ms).
+     * At 29 Hz each frame is ~34ms, so 500ms means ~15 missed frames. */
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_vsync_us > 500000) {
+        ESP_LOGW(TAG, "GDMA stall detected, restarting LCD panel");
+        esp_lcd_rgb_panel_restart(s_panel);
+        s_last_vsync_us = now;
+    }
 
     /* RGB panel reads from PSRAM framebuffer continuously.
      * draw_bitmap copies pixel data into the framebuffer — no DMA
