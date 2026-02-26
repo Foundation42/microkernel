@@ -590,7 +590,16 @@ static void cmd_info(runtime_t *rt) {
 /* ── MIDI note sequence player actor ─────────────────────────────── */
 
 #define PLAYER_MAX_NOTES  128
-#define PLAYER_BOOTSTRAP  1
+#define PLAYER_NEW_SEQ    2   /* message: load new sequence and start playing */
+
+typedef struct __attribute__((packed)) {
+    uint8_t  notes[PLAYER_MAX_NOTES];
+    uint8_t  count;
+    uint8_t  vel;
+    uint8_t  ch;
+    uint8_t  _pad;
+    uint32_t interval_ms;
+} player_seq_payload_t;
 
 typedef struct {
     actor_id_t midi_id;
@@ -602,34 +611,61 @@ typedef struct {
     uint8_t    last_note;
     bool       note_on;
     uint64_t   interval_ms;
+    timer_id_t timer;
+    bool       timer_running;
 } player_state_t;
+
+static void player_note_off(player_state_t *p, runtime_t *rt) {
+    if (!p->note_on) return;
+    midi_send_payload_t off;
+    memset(&off, 0, sizeof(off));
+    off.status = (uint8_t)(0x80 | (p->ch & 0x0F));
+    off.data1  = p->last_note & 0x7F;
+    off.data2  = 0;
+    actor_send(rt, p->midi_id, MSG_MIDI_SEND, &off, sizeof(off));
+    p->note_on = false;
+}
+
+static void player_stop_timer(player_state_t *p, runtime_t *rt) {
+    if (!p->timer_running) return;
+    actor_cancel_timer(rt, p->timer);
+    p->timer_running = false;
+}
 
 static bool player_behavior(runtime_t *rt, actor_t *self,
                              message_t *msg, void *state) {
     (void)self;
     player_state_t *p = state;
 
-    if (msg->type == PLAYER_BOOTSTRAP) {
-        /* Start periodic timer — first tick plays first note */
-        actor_set_timer(rt, p->interval_ms, true);
+    if (msg->type == PLAYER_NEW_SEQ) {
+        /* Load new sequence — stop any current playback first */
+        player_note_off(p, rt);
+        player_stop_timer(p, rt);
+
+        if (msg->payload_size < 4) return true; /* bad payload */
+        const player_seq_payload_t *seq =
+            (const player_seq_payload_t *)msg->payload;
+
+        memcpy(p->notes, seq->notes, seq->count);
+        p->count = seq->count;
+        p->vel = seq->vel;
+        p->ch = seq->ch;
+        p->interval_ms = seq->interval_ms;
+        p->pos = 0;
+
+        /* Start periodic timer */
+        p->timer = actor_set_timer(rt, p->interval_ms, true);
+        p->timer_running = true;
         return true;
     }
 
     if (msg->type == MSG_TIMER) {
         /* Note-off for previous note */
-        if (p->note_on) {
-            midi_send_payload_t off;
-            memset(&off, 0, sizeof(off));
-            off.status = (uint8_t)(0x80 | (p->ch & 0x0F));
-            off.data1  = p->last_note & 0x7F;
-            off.data2  = 0;
-            actor_send(rt, p->midi_id, MSG_MIDI_SEND, &off, sizeof(off));
-            p->note_on = false;
-        }
+        player_note_off(p, rt);
 
         if (p->pos >= p->count) {
-            /* Sequence finished — stop self */
-            actor_stop(rt, actor_self(rt));
+            /* Sequence finished — stop timer, stay alive for reuse */
+            player_stop_timer(p, rt);
             return true;
         }
 
@@ -1010,29 +1046,31 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
             return;
         }
 
-        /* Stop existing player if any */
-        actor_id_t existing = actor_lookup(rt, "/sys/midi_player");
-        if (existing != ACTOR_ID_INVALID)
-            actor_stop(rt, existing);
-
-        player_state_t *ps = calloc(1, sizeof(*ps));
-        if (!ps) { printf("Out of memory\n"); return; }
-
-        ps->midi_id = midi;
-        memcpy(ps->notes, notes, (size_t)note_count);
-        ps->count = note_count;
-        ps->vel = vel;
-        ps->ch = ch;
-        ps->interval_ms = 60000 / (bpm ? bpm : 120);
-
-        actor_id_t player = actor_spawn(rt, player_behavior, ps, free, 16);
+        /* Spawn player once, reuse on subsequent calls */
+        actor_id_t player = actor_lookup(rt, "/sys/midi_player");
         if (player == ACTOR_ID_INVALID) {
-            printf("Failed to spawn player\n");
-            return;
+            player_state_t *ps = calloc(1, sizeof(*ps));
+            if (!ps) { printf("Out of memory\n"); return; }
+            ps->midi_id = midi;
+
+            player = actor_spawn(rt, player_behavior, ps, free, 16);
+            if (player == ACTOR_ID_INVALID) {
+                printf("Failed to spawn player\n");
+                return;
+            }
+            actor_register_name(rt, "/sys/midi_player", player);
         }
 
-        actor_register_name(rt, "/sys/midi_player", player);
-        actor_send(rt, player, PLAYER_BOOTSTRAP, NULL, 0);
+        /* Send new sequence to player (resets and starts playback) */
+        player_seq_payload_t seq;
+        memset(&seq, 0, sizeof(seq));
+        memcpy(seq.notes, notes, (size_t)note_count);
+        seq.count = (uint8_t)note_count;
+        seq.vel = vel;
+        seq.ch = ch;
+        seq.interval_ms = (uint32_t)(60000 / (bpm ? bpm : 120));
+
+        actor_send(rt, player, PLAYER_NEW_SEQ, &seq, sizeof(seq));
 
         printf("Playing %d notes at %u BPM, vel=%u, ch=%u\n",
                note_count, bpm, vel, ch);
@@ -1043,7 +1081,10 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
     if (strcmp(sub, "stop") == 0) {
         actor_id_t player = actor_lookup(rt, "/sys/midi_player");
         if (player != ACTOR_ID_INVALID) {
-            actor_stop(rt, player);
+            /* Send empty sequence to stop playback (player stays alive) */
+            player_seq_payload_t seq;
+            memset(&seq, 0, sizeof(seq));
+            actor_send(rt, player, PLAYER_NEW_SEQ, &seq, sizeof(seq));
             printf("Player stopped\n");
         } else {
             printf("No player running\n");
