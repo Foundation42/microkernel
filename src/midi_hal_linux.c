@@ -45,10 +45,10 @@ void midi_hal_deinit(void) {
 }
 
 bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
-                        int sda, int scl, int irq,
+                        int sda, int scl, int irq, int rst,
                         uint32_t i2c_freq) {
     (void)i2c_port; (void)i2c_addr;
-    (void)sda; (void)scl; (void)irq;
+    (void)sda; (void)scl; (void)irq; (void)rst;
     (void)i2c_freq;
     s_configured = true;
     return true;

@@ -1762,7 +1762,7 @@ static void *shell_runner(void *arg) {
         }
     }
 
-#ifdef CF_PROXY_URL
+#if defined(CF_PROXY_URL) && SOC_WIFI_SUPPORTED
     {
         cf_proxy_config_t cf_cfg;
         memset(&cf_cfg, 0, sizeof(cf_cfg));

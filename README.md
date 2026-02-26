@@ -33,7 +33,7 @@ scheduler with integrated I/O polling.
 - **Actor state persistence** -- file-backed binary save/load; WASM host functions `mk_save_state()`/`mk_load_state()` for cross-reload state preservation
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Display + ANSI console** -- multi-board display stack with HAL abstraction: 466x466 AMOLED (SH8601 QSPI) and 800x480 LCD (ST7262 RGB parallel); 8x16 font rendering, virtual terminal with dynamic grid sizing (58x29 or 100x30), ANSI escape sequence parsing, dirty-row tracking; dashboard auto-adapts layout (circular bezel margins vs full-width rectangular); board selected at build time via `idf.py menuconfig`
-- **MIDI** -- full MIDI actor for SC16IS752 UART-to-I2C bridge (31250 baud); interrupt-driven receive with byte parser (running status, SysEx, real-time interleaving), subscriber dispatch with channel/message filtering; MIDI monitor actor (human-readable traffic logging); arpeggiator actor (UP/DOWN/UPDOWN/RANDOM patterns, 1-4 octave range, BPM-driven 16th-note stepping, legato output, enable/disable)
+- **MIDI** -- full MIDI actor for SC16IS752 UART-to-I2C bridge (31250 baud); hardware reset via GPIO, interrupt-driven receive with byte parser (running status, SysEx, real-time interleaving), subscriber dispatch with channel/message filtering; MIDI monitor actor (human-readable traffic logging); arpeggiator actor (UP/DOWN/UPDOWN/RANDOM patterns, 1-4 octave range, BPM-driven 16th-note stepping, legato output, enable/disable); note sequence player with configurable BPM/velocity/channel
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, display, and interactive shell
@@ -73,7 +73,7 @@ Runs 18 smoke tests on boot (6 on chips without WiFi). Tested on:
 
 - **ESP32-S3** (Xtensa) -- TinyS3, Waveshare AMOLED 1.43", Waveshare LCD 4.3B -- 18 tests
 - **ESP32-C6** (RISC-V) -- ESP32-C6-DevKit, C6-Zero -- 18 tests
-- **ESP32-P4** (RISC-V dual-core) -- ESP32-P4 -- 6 tests (no WiFi radio)
+- **ESP32-P4** (RISC-V dual-core) -- ESP32-P4, Waveshare P4-Pico -- 6 tests (no WiFi radio)
 
 For boards with displays, select the target board before building:
 
@@ -307,7 +307,8 @@ Commands: `help`, `list`, `info` (alias `top`), `self`, `whoami`,
 `load <path>`, `reload <name> <path>`, `send <name-or-id> <type> [data|x:hex]`,
 `call <name-or-id> <type> [data|x:hex]`, `stop <name-or-id>`,
 `register <name>`, `lookup <name>`, `ls [/prefix]`,
-`mount <host>[:<port>]`, `caps [target]`, `exit`
+`mount <host>[:<port>]`, `caps [target]`,
+`midi <configure|note|cc|pc|send|play|stop|monitor|arp|status>`, `exit`
 
 The `send` and `call` commands accept an optional `x:` prefix on the payload to
 send hex-encoded binary data (e.g., `call led 4278190145 x:0000ff000000` sends
@@ -446,6 +447,33 @@ Two higher-level actors build on the MIDI actor:
   endpoint repeat), and RANDOM patterns across 1-4 octaves. BPM-driven 16th-note
   stepping with legato output (Note On before Note Off). Configurable via messages:
   `MSG_ARP_SET_BPM`, `MSG_ARP_SET_PATTERN`, `MSG_ARP_SET_OCTAVES`, `MSG_ARP_ENABLE`
+
+**Shell MIDI commands:**
+
+```
+> midi configure                              # auto-detect defaults for board
+> midi configure 0 0x48 7 8 3 2 400000        # port addr sda scl irq rst freq
+> midi note 0 60 100                          # Note On: ch=0 C4 vel=100
+> midi note 0 60 0                            # Note Off: ch=0 C4
+> midi cc 0 1 64                              # CC: ch=0 mod-wheel=64
+> midi pc 0 5                                 # Program Change: ch=0 pgm=5
+> midi send 90 3C 7F                          # Raw: Note On C4 vel=127
+> midi play 60 62 64 65 67 --bpm 180          # Play note sequence (C major scale)
+> midi play 60 0 64 0 67 --bpm 120 --vel 80   # Notes with rests (0=rest)
+> midi stop                                   # Stop player
+> midi monitor                                # Start live MIDI traffic monitor
+> midi arp on                                 # Enable arpeggiator
+> midi arp bpm 140                            # Set arp tempo
+> midi arp pattern updown                     # Set arp pattern (up/down/updown/random)
+> midi arp octaves 2                          # Set arp octave range (1-4)
+> midi status                                 # Show SC16IS752 register diagnostics
+```
+
+**Hardware notes:** The SC16IS752 /RST pin should be connected to a GPIO for
+reliable startup (the HAL pulses reset before I2C configuration). Default
+pin assignments for ESP32-P4-Pico: SDA=GPIO7, SCL=GPIO8, IRQ=GPIO3, RST=GPIO2.
+The MIDI HAL shares the I2C bus with other peripherals (display, touch) when
+present -- it detects an already-installed driver and skips bus setup.
 
 ## Project structure
 

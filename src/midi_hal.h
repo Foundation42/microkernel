@@ -14,9 +14,10 @@ void midi_hal_deinit(void);
 
 /* Configure the SC16IS752 via I2C.
  * Sets up both UART channels at 31250 baud, enables RX FIFO interrupt.
+ * rst = GPIO pin for /RST (active low), or -1 for none.
  * Returns true on success. */
 bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
-                        int sda, int scl, int irq,
+                        int sda, int scl, int irq, int rst,
                         uint32_t i2c_freq);
 
 /* Release I2C + IRQ resources. */

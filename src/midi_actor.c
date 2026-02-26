@@ -252,9 +252,10 @@ static void handle_configure(midi_state_t *s, runtime_t *rt, message_t *msg) {
     if (s->configured)
         midi_hal_deconfigure();
 
+    int rst = (cfg->rst_pin == 0xFF) ? -1 : (int)cfg->rst_pin;
     if (!midi_hal_configure(cfg->i2c_port, cfg->i2c_addr,
                             cfg->sda_pin, cfg->scl_pin,
-                            cfg->irq_pin, cfg->i2c_freq_hz)) {
+                            cfg->irq_pin, rst, cfg->i2c_freq_hz)) {
         reply_error(rt, msg->source, "hal configure failed");
         return;
     }

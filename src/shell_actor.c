@@ -587,14 +587,81 @@ static void cmd_info(runtime_t *rt) {
         printf("\nTransports: %zu\n", tc);
 }
 
+/* ── MIDI note sequence player actor ─────────────────────────────── */
+
+#define PLAYER_MAX_NOTES  128
+#define PLAYER_BOOTSTRAP  1
+
+typedef struct {
+    actor_id_t midi_id;
+    uint8_t    notes[PLAYER_MAX_NOTES];
+    int        count;
+    int        pos;
+    uint8_t    vel;
+    uint8_t    ch;
+    uint8_t    last_note;
+    bool       note_on;
+    uint64_t   interval_ms;
+} player_state_t;
+
+static bool player_behavior(runtime_t *rt, actor_t *self,
+                             message_t *msg, void *state) {
+    (void)self;
+    player_state_t *p = state;
+
+    if (msg->type == PLAYER_BOOTSTRAP) {
+        /* Start periodic timer — first tick plays first note */
+        actor_set_timer(rt, p->interval_ms, true);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER) {
+        /* Note-off for previous note */
+        if (p->note_on) {
+            midi_send_payload_t off;
+            memset(&off, 0, sizeof(off));
+            off.status = (uint8_t)(0x80 | (p->ch & 0x0F));
+            off.data1  = p->last_note & 0x7F;
+            off.data2  = 0;
+            actor_send(rt, p->midi_id, MSG_MIDI_SEND, &off, sizeof(off));
+            p->note_on = false;
+        }
+
+        if (p->pos >= p->count) {
+            /* Sequence finished — stop self */
+            actor_stop(rt, actor_self(rt));
+            return true;
+        }
+
+        /* Note-on for next note (0 = rest) */
+        uint8_t note = p->notes[p->pos];
+        if (note > 0) {
+            midi_send_payload_t on;
+            memset(&on, 0, sizeof(on));
+            on.status = (uint8_t)(0x90 | (p->ch & 0x0F));
+            on.data1  = note & 0x7F;
+            on.data2  = p->vel & 0x7F;
+            actor_send(rt, p->midi_id, MSG_MIDI_SEND, &on, sizeof(on));
+            p->last_note = note;
+            p->note_on = true;
+        }
+
+        p->pos++;
+        return true;
+    }
+
+    return true;
+}
+
 /* ── MIDI commands ────────────────────────────────────────────────── */
 
-/* Default SC16IS752 config for LCD 4.3B board */
+/* Default SC16IS752 config for ESP32-P4-Pico */
 #define MIDI_DEFAULT_I2C_PORT  0
 #define MIDI_DEFAULT_I2C_ADDR  0x48
-#define MIDI_DEFAULT_SDA       8
-#define MIDI_DEFAULT_SCL       9
-#define MIDI_DEFAULT_IRQ       43
+#define MIDI_DEFAULT_SDA       7
+#define MIDI_DEFAULT_SCL       8
+#define MIDI_DEFAULT_IRQ       3
+#define MIDI_DEFAULT_RST       2
 #define MIDI_DEFAULT_I2C_FREQ  400000
 
 static const char *note_names[] = {
@@ -613,8 +680,8 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
     if (sub[0] == '\0' || strcmp(sub, "help") == 0) {
         printf(
             "MIDI commands:\n"
-            "  midi configure [port addr sda scl irq freq]\n"
-            "                    Configure SC16IS752 (defaults: 0 0x48 8 9 43 400000)\n"
+            "  midi configure [port addr sda scl irq rst freq]\n"
+            "                    Configure SC16IS752 (defaults: 0 0x48 7 8 3 2 400000)\n"
             "  midi send <status> <d1> [d2]\n"
             "                    Send MIDI message (hex: 90 3C 7F = Note On C4)\n"
             "  midi note <ch> <note> <vel>\n"
@@ -623,6 +690,9 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
             "                    Control Change\n"
             "  midi pc <ch> <program>\n"
             "                    Program Change\n"
+            "  midi play <notes...> [--bpm 120] [--vel 100] [--ch 0]\n"
+            "                    Play note sequence (0=rest)\n"
+            "  midi stop         Stop player\n"
             "  midi monitor      Start MIDI monitor\n"
             "  midi arp [on|off|bpm N|pattern up|down|updown|random|octaves N]\n"
             "                    Arpeggiator control\n"
@@ -639,19 +709,22 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
         const char *peek = next_word(args, arg1, sizeof(arg1));
 
         if (arg1[0] != '\0') {
-            /* Parse all 6 params */
+            /* Parse all 7 params: port addr sda scl irq rst freq */
             cfg.i2c_port   = (uint8_t)strtoul(arg1, NULL, 0);
-            char a2[16], a3[16], a4[16], a5[16], a6[16];
+            char a2[16], a3[16], a4[16], a5[16], a6[16], a7[16];
             peek = next_word(peek, a2, sizeof(a2));
             peek = next_word(peek, a3, sizeof(a3));
             peek = next_word(peek, a4, sizeof(a4));
             peek = next_word(peek, a5, sizeof(a5));
-            next_word(peek, a6, sizeof(a6));
-            cfg.i2c_addr   = (uint8_t)strtoul(a2, NULL, 0);
-            cfg.sda_pin    = (uint8_t)strtoul(a3, NULL, 0);
-            cfg.scl_pin    = (uint8_t)strtoul(a4, NULL, 0);
-            cfg.irq_pin    = (uint8_t)strtoul(a5, NULL, 0);
-            cfg.i2c_freq_hz = (uint32_t)strtoul(a6, NULL, 0);
+            peek = next_word(peek, a6, sizeof(a6));
+            next_word(peek, a7, sizeof(a7));
+            cfg.i2c_addr    = (uint8_t)strtoul(a2, NULL, 0);
+            cfg.sda_pin     = (uint8_t)strtoul(a3, NULL, 0);
+            cfg.scl_pin     = (uint8_t)strtoul(a4, NULL, 0);
+            cfg.irq_pin     = (uint8_t)strtoul(a5, NULL, 0);
+            cfg.rst_pin     = (uint8_t)strtoul(a6, NULL, 0);
+            cfg.i2c_freq_hz = (uint32_t)strtoul(a7, NULL, 0);
+            if (cfg.rst_pin == 0) cfg.rst_pin = 0xFF; /* 0 = none */
         } else {
             /* Defaults */
             cfg.i2c_port    = MIDI_DEFAULT_I2C_PORT;
@@ -659,12 +732,17 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
             cfg.sda_pin     = MIDI_DEFAULT_SDA;
             cfg.scl_pin     = MIDI_DEFAULT_SCL;
             cfg.irq_pin     = MIDI_DEFAULT_IRQ;
+            cfg.rst_pin     = MIDI_DEFAULT_RST;
             cfg.i2c_freq_hz = MIDI_DEFAULT_I2C_FREQ;
         }
 
-        printf("MIDI configure: I2C%d addr=0x%02X sda=%d scl=%d irq=%d freq=%lu\n",
+        printf("MIDI configure: I2C%d addr=0x%02X sda=%d scl=%d irq=%d rst=%s freq=%lu\n",
                cfg.i2c_port, cfg.i2c_addr, cfg.sda_pin, cfg.scl_pin,
-               cfg.irq_pin, (unsigned long)cfg.i2c_freq_hz);
+               cfg.irq_pin,
+               cfg.rst_pin == 0xFF ? "none" : "GPIO",
+               (unsigned long)cfg.i2c_freq_hz);
+        if (cfg.rst_pin != 0xFF)
+            printf("  rst=GPIO%d\n", cfg.rst_pin);
 
         actor_id_t midi = actor_lookup(rt, "/node/hardware/midi");
         if (midi == ACTOR_ID_INVALID) {
@@ -877,6 +955,98 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
             printf("Arpeggiator stopped\n");
         } else {
             printf("Unknown: midi arp %s\n", action);
+        }
+        return;
+    }
+
+    /* ── midi play <notes...> [--bpm N] [--vel N] [--ch N] ─────── */
+    if (strcmp(sub, "play") == 0) {
+        /* Defaults */
+        uint16_t bpm = 120;
+        uint8_t  vel = 100;
+        uint8_t  ch  = 0;
+
+        /* Parse notes and flags */
+        uint8_t notes[PLAYER_MAX_NOTES];
+        int     note_count = 0;
+        char    tok[16];
+
+        while (1) {
+            args = next_word(args, tok, sizeof(tok));
+            if (tok[0] == '\0') break;
+
+            if (strcmp(tok, "--bpm") == 0 || strcmp(tok, "-b") == 0) {
+                args = next_word(args, tok, sizeof(tok));
+                if (tok[0]) bpm = (uint16_t)atoi(tok);
+                continue;
+            }
+            if (strcmp(tok, "--vel") == 0 || strcmp(tok, "-v") == 0) {
+                args = next_word(args, tok, sizeof(tok));
+                if (tok[0]) vel = (uint8_t)atoi(tok);
+                continue;
+            }
+            if (strcmp(tok, "--ch") == 0 || strcmp(tok, "-c") == 0) {
+                args = next_word(args, tok, sizeof(tok));
+                if (tok[0]) ch = (uint8_t)atoi(tok);
+                continue;
+            }
+
+            if (note_count < PLAYER_MAX_NOTES)
+                notes[note_count++] = (uint8_t)strtoul(tok, NULL, 0);
+        }
+
+        if (note_count == 0) {
+            printf(
+                "Usage: midi play <note> [note...] [--bpm 120] [--vel 100] [--ch 0]\n"
+                "  Notes are MIDI numbers: 60=C4 62=D4 64=E4 65=F4 67=G4 69=A4 71=B4 72=C5\n"
+                "  Example: midi play 60 62 64 65 67 69 71 72 --bpm 180\n"
+            );
+            return;
+        }
+
+        actor_id_t midi = actor_lookup(rt, "/node/hardware/midi");
+        if (midi == ACTOR_ID_INVALID) {
+            printf("MIDI actor not found\n");
+            return;
+        }
+
+        /* Stop existing player if any */
+        actor_id_t existing = actor_lookup(rt, "/sys/midi_player");
+        if (existing != ACTOR_ID_INVALID)
+            actor_stop(rt, existing);
+
+        player_state_t *ps = calloc(1, sizeof(*ps));
+        if (!ps) { printf("Out of memory\n"); return; }
+
+        ps->midi_id = midi;
+        memcpy(ps->notes, notes, (size_t)note_count);
+        ps->count = note_count;
+        ps->vel = vel;
+        ps->ch = ch;
+        ps->interval_ms = 60000 / (bpm ? bpm : 120);
+
+        actor_id_t player = actor_spawn(rt, player_behavior, ps, free, 16);
+        if (player == ACTOR_ID_INVALID) {
+            printf("Failed to spawn player\n");
+            return;
+        }
+
+        actor_register_name(rt, "/sys/midi_player", player);
+        actor_send(rt, player, PLAYER_BOOTSTRAP, NULL, 0);
+
+        printf("Playing %d notes at %u BPM, vel=%u, ch=%u\n",
+               note_count, bpm, vel, ch);
+        return;
+    }
+
+    /* ── midi stop ───────────────────────────────────────────────── */
+    if (strcmp(sub, "stop") == 0) {
+        actor_id_t player = actor_lookup(rt, "/sys/midi_player");
+        if (player != ACTOR_ID_INVALID) {
+            actor_stop(rt, player);
+            printf("Player stopped\n");
+        } else {
+            printf("No player running\n");
         }
         return;
     }

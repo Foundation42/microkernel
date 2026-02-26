@@ -28,7 +28,8 @@ typedef struct {
     uint8_t  sda_pin;
     uint8_t  scl_pin;
     uint8_t  irq_pin;     /* GPIO pin for IRQ (active low) */
-    uint8_t  _pad[3];
+    uint8_t  rst_pin;     /* GPIO pin for /RST (active low), 0xFF = none */
+    uint8_t  _pad[2];
     uint32_t i2c_freq_hz; /* 100000 or 400000 */
 } midi_config_payload_t;
 

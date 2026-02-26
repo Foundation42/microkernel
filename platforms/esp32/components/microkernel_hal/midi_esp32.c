@@ -6,7 +6,8 @@
  * 31250 baud, 8N1, 12 MHz crystal → divisor 24
  *
  * IRQ: active-low open-drain from SC16IS752 → GPIO ISR → eventfd notification
- * I2C: shares bus with CH422G / touch (I2C_NUM_0, SDA=8, SCL=9)
+ * RST: active-low reset via GPIO — pulse low 10ms then release before I2C probe
+ * I2C: shares bus with other peripherals on same port
  */
 
 #include "midi_hal.h"
@@ -15,6 +16,8 @@
 #include <esp_vfs_eventfd.h>
 #include <driver/gpio.h>
 #include <driver/i2c.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
@@ -69,6 +72,7 @@ static int      s_notify_fd = -1;
 static int      s_i2c_port  = -1;
 static uint8_t  s_i2c_addr;        /* 7-bit address */
 static int      s_irq_pin  = -1;
+static int      s_rst_pin  = -1;
 static bool     s_configured;
 static bool     s_i2c_installed;    /* did we install the driver? */
 
@@ -215,30 +219,52 @@ void midi_hal_deinit(void) {
 }
 
 bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
-                        int sda, int scl, int irq,
+                        int sda, int scl, int irq, int rst,
                         uint32_t i2c_freq) {
     s_i2c_port = i2c_port;
     s_i2c_addr = i2c_addr;
+    s_rst_pin  = rst;
+
+    /* Pulse /RST if a reset pin is configured.
+     * Drive low for 10ms, then release high and wait 10ms for oscillator
+     * startup before attempting I2C communication. */
+    if (rst >= 0) {
+        gpio_config_t rst_cfg = {
+            .pin_bit_mask = (1ULL << rst),
+            .mode         = GPIO_MODE_OUTPUT,
+            .pull_up_en   = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&rst_cfg);
+
+        gpio_set_level((gpio_num_t)rst, 0);  /* assert reset */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level((gpio_num_t)rst, 1);  /* release reset */
+        vTaskDelay(pdMS_TO_TICKS(10));        /* wait for crystal startup */
+
+        ESP_LOGI(TAG, "SC16IS752 /RST pulsed on GPIO%d", rst);
+    }
+
+    /* Configure I2C bus pins + clock first (ESP-IDF requires param_config
+     * before driver_install for correct GPIO setup). */
+    i2c_config_t conf = {
+        .mode             = I2C_MODE_MASTER,
+        .sda_io_num       = sda,
+        .scl_io_num       = scl,
+        .sda_pullup_en    = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en    = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = i2c_freq,
+    };
+    i2c_param_config((i2c_port_t)i2c_port, &conf);
 
     /* Try to install I2C driver — likely already installed by display HAL.
-     * ESP-IDF v5.5 returns ESP_FAIL (not ESP_ERR_INVALID_STATE) when
-     * the driver is already installed, so we attempt install and treat
-     * any non-OK result as "bus already set up". */
+     * ESP-IDF may return ESP_FAIL or ESP_ERR_INVALID_STATE when the
+     * driver is already installed, so treat any non-OK as "already up". */
     esp_err_t ret = i2c_driver_install((i2c_port_t)i2c_port, I2C_MODE_MASTER, 0, 0, 0);
     if (ret == ESP_OK) {
-        /* We installed it — configure pins */
         s_i2c_installed = true;
-        i2c_config_t conf = {
-            .mode             = I2C_MODE_MASTER,
-            .sda_io_num       = sda,
-            .scl_io_num       = scl,
-            .sda_pullup_en    = GPIO_PULLUP_ENABLE,
-            .scl_pullup_en    = GPIO_PULLUP_ENABLE,
-            .master.clk_speed = i2c_freq,
-        };
-        i2c_param_config((i2c_port_t)i2c_port, &conf);
     } else {
-        /* Already installed by display/i2c HAL — just share the bus */
         ESP_LOGI(TAG, "I2C%d already installed, sharing bus", i2c_port);
         s_i2c_installed = false;
     }
@@ -253,7 +279,28 @@ bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
     i2c_cmd_link_delete(probe);
 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SC16IS752 not found at 0x%02X", i2c_addr);
+        ESP_LOGE(TAG, "SC16IS752 not found at 0x%02X (err=%s)", i2c_addr,
+                 esp_err_to_name(ret));
+
+        /* Scan bus to show what IS responding */
+        ESP_LOGI(TAG, "I2C bus scan (0x08-0x77):");
+        int found = 0;
+        for (uint8_t a = 0x08; a <= 0x77; a++) {
+            i2c_cmd_handle_t sc = i2c_cmd_link_create();
+            i2c_master_start(sc);
+            i2c_master_write_byte(sc, (a << 1) | I2C_MASTER_WRITE, true);
+            i2c_master_stop(sc);
+            esp_err_t sr = i2c_master_cmd_begin((i2c_port_t)i2c_port, sc,
+                                                 pdMS_TO_TICKS(I2C_TIMEOUT_MS));
+            i2c_cmd_link_delete(sc);
+            if (sr == ESP_OK) {
+                ESP_LOGI(TAG, "  0x%02X ACK", a);
+                found++;
+            }
+        }
+        if (found == 0)
+            ESP_LOGW(TAG, "  (no devices found — check wiring!)");
+
         if (s_i2c_installed) {
             i2c_driver_delete((i2c_port_t)i2c_port);
             s_i2c_installed = false;
@@ -275,6 +322,21 @@ bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
         return false;
     }
 
+    /* Verify configuration — read back key registers */
+    {
+        uint8_t ier_a = 0, lcr_a = 0, lcr_b = 0, ier_b = 0;
+        sc16_read_reg(SC16_REG(REG_IER, SC16_CH_A), &ier_a);
+        sc16_read_reg(SC16_REG(REG_LCR, SC16_CH_A), &lcr_a);
+        sc16_read_reg(SC16_REG(REG_IER, SC16_CH_B), &ier_b);
+        sc16_read_reg(SC16_REG(REG_LCR, SC16_CH_B), &lcr_b);
+        ESP_LOGI(TAG, "verify: ChA IER=0x%02X LCR=0x%02X, ChB IER=0x%02X LCR=0x%02X",
+                 ier_a, lcr_a, ier_b, lcr_b);
+        if (lcr_a != LCR_8N1 || lcr_b != LCR_8N1)
+            ESP_LOGW(TAG, "LCR mismatch! Expected 0x%02X", LCR_8N1);
+        if (ier_a != IER_RHR)
+            ESP_LOGW(TAG, "IER ChA mismatch! Expected 0x%02X, got 0x%02X", IER_RHR, ier_a);
+    }
+
     /* Set up GPIO ISR on IRQ pin (active low, falling edge) */
     s_irq_pin = irq;
 
@@ -293,7 +355,11 @@ bool midi_hal_configure(int i2c_port, uint8_t i2c_addr,
     gpio_isr_handler_add((gpio_num_t)irq, midi_irq_handler, NULL);
     gpio_intr_enable((gpio_num_t)irq);
 
-    ESP_LOGI(TAG, "configured: I2C%d addr=0x%02X irq=GPIO%d", i2c_port, i2c_addr, irq);
+    ESP_LOGI(TAG, "configured: I2C%d addr=0x%02X irq=GPIO%d rst=%s",
+             i2c_port, i2c_addr, irq,
+             rst >= 0 ? "GPIO" : "none");
+    if (rst >= 0)
+        ESP_LOGI(TAG, "  rst=GPIO%d", rst);
     s_configured = true;
     return true;
 }
