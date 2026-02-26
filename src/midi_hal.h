@@ -33,6 +33,18 @@ int midi_hal_drain_rx(uint8_t *buf, int max);
  * Returns 0 on success, -1 on error. */
 int midi_hal_tx(const uint8_t *data, size_t len);
 
+/* Read SC16IS752 diagnostic registers (Channel A).
+ * Returns true on success. Values set to 0 on failure. */
+typedef struct {
+    uint8_t rxlvl;   /* bytes waiting in RX FIFO */
+    uint8_t txlvl;   /* free space in TX FIFO */
+    uint8_t lsr;     /* Line Status Register */
+    uint8_t iir;     /* Interrupt Identification Register */
+    uint8_t ier;     /* Interrupt Enable Register */
+} midi_hal_status_t;
+
+bool midi_hal_read_status(midi_hal_status_t *out);
+
 /* ── Test helpers (Linux mock only) ──────────────────────────────── */
 
 #ifndef ESP_PLATFORM

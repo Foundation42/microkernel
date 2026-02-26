@@ -30,6 +30,7 @@
 #include "microkernel/display.h"
 #include "microkernel/console.h"
 #include "microkernel/dashboard.h"
+#include "microkernel/midi.h"
 #include "microkernel/shell.h"
 #include "microkernel/mk_readline.h"
 #include <errno.h>
@@ -1686,7 +1687,7 @@ static bool shell_console_behavior(runtime_t *rt, actor_t *self,
 static void *shell_runner(void *arg) {
     (void)arg;
 
-    runtime_t *rt = runtime_init(mk_node_id(), 16);
+    runtime_t *rt = runtime_init(mk_node_id(), 32);
     if (!rt) {
         ESP_LOGE(TAG, "shell: runtime_init failed");
         return NULL;
@@ -1737,6 +1738,12 @@ static void *shell_runner(void *arg) {
         if (led_id != ACTOR_ID_INVALID)
             ESP_LOGI(TAG, "shell: led actor started (id=%" PRIu64 ")",
                      (uint64_t)led_id);
+    }
+    {
+        actor_id_t midi_id = midi_actor_init(rt);
+        if (midi_id != ACTOR_ID_INVALID)
+            ESP_LOGI(TAG, "shell: midi actor started (id=%" PRIu64 ")",
+                     (uint64_t)midi_id);
     }
     {
         actor_id_t display_id = display_actor_init(rt);

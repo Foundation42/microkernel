@@ -24,6 +24,7 @@ idf_component_register(
         "i2c_esp32.c"
         "pwm_esp32.c"
         "led_esp32.c"
+        "midi_esp32.c"
         ${DISPLAY_SRC}
         ${FIBER_SRCS}
     INCLUDE_DIRS "."

@@ -87,6 +87,11 @@ int midi_hal_tx(const uint8_t *data, size_t len) {
     return 0;
 }
 
+bool midi_hal_read_status(midi_hal_status_t *out) {
+    memset(out, 0, sizeof(*out));
+    return s_configured;
+}
+
 /* ── Test helpers ─────────────────────────────────────────────────── */
 
 void midi_mock_inject_rx(const uint8_t *data, size_t len) {

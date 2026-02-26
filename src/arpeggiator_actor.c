@@ -402,10 +402,8 @@ actor_id_t arpeggiator_init(runtime_t *rt) {
     s->direction = 1;
 
     actor_id_t id = actor_spawn(rt, arp_behavior, s, arp_state_free, 64);
-    if (id == ACTOR_ID_INVALID) {
-        free(s);
+    if (id == ACTOR_ID_INVALID)
         return ACTOR_ID_INVALID;
-    }
 
     actor_register_name(rt, "/sys/arpeggiator", id);
 

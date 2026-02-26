@@ -10,6 +10,10 @@
 #include "microkernel/message.h"
 #include "microkernel/services.h"
 #include "microkernel/namespace.h"
+#include "microkernel/midi.h"
+#include "microkernel/midi_monitor.h"
+#include "microkernel/arpeggiator.h"
+#include "midi_hal.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -148,6 +152,7 @@ static void cmd_help(void) {
 #if SOC_WIFI_SUPPORTED || !defined(ESP_PLATFORM)
         "  mount <host>[:<port>]  Connect to remote node\n"
 #endif
+        "  midi [help]       MIDI commands (configure, send, monitor, arp)\n"
         "  caps [target]     Query node capabilities\n"
         "  exit              Exit shell\n"
     );
@@ -582,6 +587,326 @@ static void cmd_info(runtime_t *rt) {
         printf("\nTransports: %zu\n", tc);
 }
 
+/* ── MIDI commands ────────────────────────────────────────────────── */
+
+/* Default SC16IS752 config for LCD 4.3B board */
+#define MIDI_DEFAULT_I2C_PORT  0
+#define MIDI_DEFAULT_I2C_ADDR  0x48
+#define MIDI_DEFAULT_SDA       8
+#define MIDI_DEFAULT_SCL       9
+#define MIDI_DEFAULT_IRQ       43
+#define MIDI_DEFAULT_I2C_FREQ  400000
+
+static const char *note_names[] = {
+    "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"
+};
+
+static void midi_note_str(uint8_t note, char *buf, size_t sz) {
+    int octave = (int)note / 12 - 1;
+    snprintf(buf, sz, "%s%d", note_names[note % 12], octave);
+}
+
+static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
+    char sub[32];
+    args = next_word(args, sub, sizeof(sub));
+
+    if (sub[0] == '\0' || strcmp(sub, "help") == 0) {
+        printf(
+            "MIDI commands:\n"
+            "  midi configure [port addr sda scl irq freq]\n"
+            "                    Configure SC16IS752 (defaults: 0 0x48 8 9 43 400000)\n"
+            "  midi send <status> <d1> [d2]\n"
+            "                    Send MIDI message (hex: 90 3C 7F = Note On C4)\n"
+            "  midi note <ch> <note> <vel>\n"
+            "                    Note On (vel=0 for Note Off)\n"
+            "  midi cc <ch> <cc#> <val>\n"
+            "                    Control Change\n"
+            "  midi pc <ch> <program>\n"
+            "                    Program Change\n"
+            "  midi monitor      Start MIDI monitor\n"
+            "  midi arp [on|off|bpm N|pattern up|down|updown|random|octaves N]\n"
+            "                    Arpeggiator control\n"
+        );
+        return;
+    }
+
+    /* ── midi configure ──────────────────────────────────────────── */
+    if (strcmp(sub, "configure") == 0 || strcmp(sub, "config") == 0) {
+        midi_config_payload_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+
+        char arg1[16];
+        const char *peek = next_word(args, arg1, sizeof(arg1));
+
+        if (arg1[0] != '\0') {
+            /* Parse all 6 params */
+            cfg.i2c_port   = (uint8_t)strtoul(arg1, NULL, 0);
+            char a2[16], a3[16], a4[16], a5[16], a6[16];
+            peek = next_word(peek, a2, sizeof(a2));
+            peek = next_word(peek, a3, sizeof(a3));
+            peek = next_word(peek, a4, sizeof(a4));
+            peek = next_word(peek, a5, sizeof(a5));
+            next_word(peek, a6, sizeof(a6));
+            cfg.i2c_addr   = (uint8_t)strtoul(a2, NULL, 0);
+            cfg.sda_pin    = (uint8_t)strtoul(a3, NULL, 0);
+            cfg.scl_pin    = (uint8_t)strtoul(a4, NULL, 0);
+            cfg.irq_pin    = (uint8_t)strtoul(a5, NULL, 0);
+            cfg.i2c_freq_hz = (uint32_t)strtoul(a6, NULL, 0);
+        } else {
+            /* Defaults */
+            cfg.i2c_port    = MIDI_DEFAULT_I2C_PORT;
+            cfg.i2c_addr    = MIDI_DEFAULT_I2C_ADDR;
+            cfg.sda_pin     = MIDI_DEFAULT_SDA;
+            cfg.scl_pin     = MIDI_DEFAULT_SCL;
+            cfg.irq_pin     = MIDI_DEFAULT_IRQ;
+            cfg.i2c_freq_hz = MIDI_DEFAULT_I2C_FREQ;
+        }
+
+        printf("MIDI configure: I2C%d addr=0x%02X sda=%d scl=%d irq=%d freq=%lu\n",
+               cfg.i2c_port, cfg.i2c_addr, cfg.sda_pin, cfg.scl_pin,
+               cfg.irq_pin, (unsigned long)cfg.i2c_freq_hz);
+
+        actor_id_t midi = actor_lookup(rt, "/node/hardware/midi");
+        if (midi == ACTOR_ID_INVALID) {
+            printf("MIDI actor not found\n");
+            return;
+        }
+
+        actor_send(rt, midi, MSG_MIDI_CONFIGURE, &cfg, sizeof(cfg));
+        sh->pending_call = true;
+        sh->call_timer = actor_set_timer(rt, 3000, false);
+        return;
+    }
+
+    /* ── midi send <status> <d1> [d2] ────────────────────────────── */
+    if (strcmp(sub, "send") == 0) {
+        char s1[8], s2[8], s3[8];
+        args = next_word(args, s1, sizeof(s1));
+        args = next_word(args, s2, sizeof(s2));
+        next_word(args, s3, sizeof(s3));
+
+        if (s1[0] == '\0' || s2[0] == '\0') {
+            printf("Usage: midi send <status> <d1> [d2]\n");
+            return;
+        }
+
+        midi_send_payload_t pay;
+        memset(&pay, 0, sizeof(pay));
+        pay.status = (uint8_t)strtoul(s1, NULL, 0);
+        pay.data1  = (uint8_t)strtoul(s2, NULL, 0);
+        pay.data2  = s3[0] ? (uint8_t)strtoul(s3, NULL, 0) : 0;
+
+        actor_id_t midi = actor_lookup(rt, "/node/hardware/midi");
+        if (midi == ACTOR_ID_INVALID) {
+            printf("MIDI actor not found\n");
+            return;
+        }
+
+        actor_send(rt, midi, MSG_MIDI_SEND, &pay, sizeof(pay));
+        sh->pending_call = true;
+        sh->call_timer = actor_set_timer(rt, 3000, false);
+        return;
+    }
+
+    /* ── midi note <ch> <note> <vel> ─────────────────────────────── */
+    if (strcmp(sub, "note") == 0) {
+        char s1[8], s2[8], s3[8];
+        args = next_word(args, s1, sizeof(s1));
+        args = next_word(args, s2, sizeof(s2));
+        next_word(args, s3, sizeof(s3));
+
+        if (s1[0] == '\0' || s2[0] == '\0') {
+            printf("Usage: midi note <channel 0-15> <note 0-127> <velocity 0-127>\n");
+            return;
+        }
+
+        uint8_t ch  = (uint8_t)strtoul(s1, NULL, 0);
+        uint8_t note = (uint8_t)strtoul(s2, NULL, 0);
+        uint8_t vel  = s3[0] ? (uint8_t)strtoul(s3, NULL, 0) : 127;
+
+        midi_send_payload_t pay;
+        memset(&pay, 0, sizeof(pay));
+        pay.status = (uint8_t)(0x90 | (ch & 0x0F));
+        pay.data1  = note & 0x7F;
+        pay.data2  = vel & 0x7F;
+
+        char nstr[8];
+        midi_note_str(note, nstr, sizeof(nstr));
+        printf("Note %s ch=%d vel=%d\n", nstr, ch, vel);
+
+        actor_id_t midi = actor_lookup(rt, "/node/hardware/midi");
+        if (midi == ACTOR_ID_INVALID) {
+            printf("MIDI actor not found\n");
+            return;
+        }
+
+        actor_send(rt, midi, MSG_MIDI_SEND, &pay, sizeof(pay));
+        sh->pending_call = true;
+        sh->call_timer = actor_set_timer(rt, 3000, false);
+        return;
+    }
+
+    /* ── midi cc <ch> <cc#> <val> ────────────────────────────────── */
+    if (strcmp(sub, "cc") == 0) {
+        char s1[8], s2[8], s3[8];
+        args = next_word(args, s1, sizeof(s1));
+        args = next_word(args, s2, sizeof(s2));
+        next_word(args, s3, sizeof(s3));
+
+        if (s1[0] == '\0' || s2[0] == '\0' || s3[0] == '\0') {
+            printf("Usage: midi cc <channel> <cc#> <value>\n");
+            return;
+        }
+
+        midi_send_payload_t pay;
+        memset(&pay, 0, sizeof(pay));
+        pay.status = (uint8_t)(0xB0 | ((uint8_t)strtoul(s1, NULL, 0) & 0x0F));
+        pay.data1  = (uint8_t)strtoul(s2, NULL, 0) & 0x7F;
+        pay.data2  = (uint8_t)strtoul(s3, NULL, 0) & 0x7F;
+
+        actor_send_named(rt, "/node/hardware/midi", MSG_MIDI_SEND,
+                         &pay, sizeof(pay));
+        sh->pending_call = true;
+        sh->call_timer = actor_set_timer(rt, 3000, false);
+        return;
+    }
+
+    /* ── midi pc <ch> <program> ──────────────────────────────────── */
+    if (strcmp(sub, "pc") == 0) {
+        char s1[8], s2[8];
+        args = next_word(args, s1, sizeof(s1));
+        next_word(args, s2, sizeof(s2));
+
+        if (s1[0] == '\0' || s2[0] == '\0') {
+            printf("Usage: midi pc <channel> <program>\n");
+            return;
+        }
+
+        midi_send_payload_t pay;
+        memset(&pay, 0, sizeof(pay));
+        pay.status = (uint8_t)(0xC0 | ((uint8_t)strtoul(s1, NULL, 0) & 0x0F));
+        pay.data1  = (uint8_t)strtoul(s2, NULL, 0) & 0x7F;
+
+        actor_send_named(rt, "/node/hardware/midi", MSG_MIDI_SEND,
+                         &pay, sizeof(pay));
+        sh->pending_call = true;
+        sh->call_timer = actor_set_timer(rt, 3000, false);
+        return;
+    }
+
+    /* ── midi monitor ────────────────────────────────────────────── */
+    if (strcmp(sub, "monitor") == 0 || strcmp(sub, "mon") == 0) {
+        actor_id_t existing = actor_lookup(rt, "/sys/midi_monitor");
+        if (existing != ACTOR_ID_INVALID) {
+            printf("MIDI monitor already running (%" PRIu64 ")\n",
+                   (uint64_t)existing);
+            return;
+        }
+
+        actor_id_t mon = midi_monitor_init(rt);
+        if (mon == ACTOR_ID_INVALID)
+            printf("Failed (is MIDI actor running?)\n");
+        else
+            printf("MIDI monitor started (%" PRIu64 ")\n", (uint64_t)mon);
+        return;
+    }
+
+    /* ── midi arp ────────────────────────────────────────────────── */
+    if (strcmp(sub, "arp") == 0) {
+        char action[16];
+        args = next_word(args, action, sizeof(action));
+
+        /* midi arp (no args) — start arpeggiator */
+        if (action[0] == '\0') {
+            actor_id_t existing = actor_lookup(rt, "/sys/arpeggiator");
+            if (existing != ACTOR_ID_INVALID) {
+                printf("Arpeggiator already running (%" PRIu64 ")\n",
+                       (uint64_t)existing);
+                return;
+            }
+            actor_id_t arp = arpeggiator_init(rt);
+            if (arp == ACTOR_ID_INVALID)
+                printf("Failed (is MIDI actor running?)\n");
+            else
+                printf("Arpeggiator started (%" PRIu64 ")\n", (uint64_t)arp);
+            return;
+        }
+
+        actor_id_t arp = actor_lookup(rt, "/sys/arpeggiator");
+        if (arp == ACTOR_ID_INVALID) {
+            printf("Arpeggiator not running (use 'midi arp' to start)\n");
+            return;
+        }
+
+        if (strcmp(action, "on") == 0) {
+            arp_enable_payload_t p = { .enable = 1 };
+            actor_send(rt, arp, MSG_ARP_ENABLE, &p, sizeof(p));
+            printf("Arpeggiator enabled\n");
+        } else if (strcmp(action, "off") == 0) {
+            arp_enable_payload_t p = { .enable = 0 };
+            actor_send(rt, arp, MSG_ARP_ENABLE, &p, sizeof(p));
+            printf("Arpeggiator disabled (bypass)\n");
+        } else if (strcmp(action, "bpm") == 0) {
+            char val[8];
+            next_word(args, val, sizeof(val));
+            if (val[0] == '\0') { printf("Usage: midi arp bpm <30-300>\n"); return; }
+            arp_bpm_payload_t p = { .bpm = (uint16_t)atoi(val) };
+            actor_send(rt, arp, MSG_ARP_SET_BPM, &p, sizeof(p));
+            printf("BPM → %d\n", p.bpm);
+        } else if (strcmp(action, "pattern") == 0) {
+            char val[16];
+            next_word(args, val, sizeof(val));
+            arp_pattern_payload_t p;
+            memset(&p, 0, sizeof(p));
+            if (strcmp(val, "up") == 0)          p.pattern = ARP_UP;
+            else if (strcmp(val, "down") == 0)   p.pattern = ARP_DOWN;
+            else if (strcmp(val, "updown") == 0) p.pattern = ARP_UPDOWN;
+            else if (strcmp(val, "random") == 0) p.pattern = ARP_RANDOM;
+            else { printf("Patterns: up down updown random\n"); return; }
+            actor_send(rt, arp, MSG_ARP_SET_PATTERN, &p, sizeof(p));
+            printf("Pattern → %s\n", val);
+        } else if (strcmp(action, "octaves") == 0) {
+            char val[8];
+            next_word(args, val, sizeof(val));
+            if (val[0] == '\0') { printf("Usage: midi arp octaves <1-4>\n"); return; }
+            arp_octaves_payload_t p = { .octaves = (uint8_t)atoi(val) };
+            actor_send(rt, arp, MSG_ARP_SET_OCTAVES, &p, sizeof(p));
+            printf("Octaves → %d\n", p.octaves);
+        } else if (strcmp(action, "stop") == 0) {
+            actor_stop(rt, arp);
+            printf("Arpeggiator stopped\n");
+        } else {
+            printf("Unknown: midi arp %s\n", action);
+        }
+        return;
+    }
+
+    /* ── midi status ─────────────────────────────────────────────── */
+    if (strcmp(sub, "status") == 0) {
+        midi_hal_status_t st;
+        if (!midi_hal_read_status(&st)) {
+            printf("MIDI not configured\n");
+            return;
+        }
+        printf("SC16IS752 Channel A (MIDI IN):\n");
+        printf("  RXLVL = %u  (bytes in RX FIFO)\n", st.rxlvl);
+        printf("  TXLVL = %u  (free in TX FIFO, Ch B)\n", st.txlvl);
+        printf("  IER   = 0x%02X  (bit0=RHR irq %s)\n",
+               st.ier, (st.ier & 0x01) ? "ENABLED" : "disabled");
+        printf("  IIR   = 0x%02X  (bit0=%s, src=%u)\n",
+               st.iir,
+               (st.iir & 0x01) ? "no-irq" : "IRQ-PENDING",
+               (st.iir >> 1) & 0x07);
+        printf("  LSR   = 0x%02X  (bit0=data-ready:%s, bit1=overrun:%s)\n",
+               st.lsr,
+               (st.lsr & 0x01) ? "YES" : "no",
+               (st.lsr & 0x02) ? "YES" : "no");
+        return;
+    }
+
+    printf("Unknown MIDI command: %s (try 'midi help')\n", sub);
+}
+
 static void cmd_caps(runtime_t *rt, const char *args) {
     char target_str[64];
     next_word(args, target_str, sizeof(target_str));
@@ -638,6 +963,8 @@ static void dispatch_command(runtime_t *rt, shell_state_t *sh,
         cmd_ls(rt, rest);
     } else if (strcmp(cmd, "info") == 0 || strcmp(cmd, "top") == 0) {
         cmd_info(rt);
+    } else if (strcmp(cmd, "midi") == 0) {
+        cmd_midi(rt, rest, sh);
     } else if (strcmp(cmd, "caps") == 0) {
         cmd_caps(rt, rest);
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {

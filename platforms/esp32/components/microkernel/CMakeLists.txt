@@ -34,6 +34,9 @@ idf_component_register(
         "${MK_SRC_DIR}/console_actor.c"
         "${MK_SRC_DIR}/text_render.c"
         "${MK_SRC_DIR}/dashboard_actor.c"
+        "${MK_SRC_DIR}/midi_actor.c"
+        "${MK_SRC_DIR}/midi_monitor_actor.c"
+        "${MK_SRC_DIR}/arpeggiator_actor.c"
         "${MK_SRC_DIR}/shell_actor.c"
         "${MK_SRC_DIR}/mk_readline.c"
     INCLUDE_DIRS

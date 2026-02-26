@@ -159,10 +159,8 @@ actor_id_t midi_monitor_init(runtime_t *rt) {
     s->midi_id = midi_id;
 
     actor_id_t id = actor_spawn(rt, monitor_behavior, s, monitor_state_free, 64);
-    if (id == ACTOR_ID_INVALID) {
-        free(s);
+    if (id == ACTOR_ID_INVALID)
         return ACTOR_ID_INVALID;
-    }
 
     actor_register_name(rt, "/sys/midi_monitor", id);
 
