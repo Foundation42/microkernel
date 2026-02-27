@@ -47,16 +47,37 @@ typedef struct {
     char         name[32];
 } seq_pattern_t;
 
+/* ── Active note tracking ────────────────────────────────────────── */
+
+/* 16 channels × 128 notes = 256 bytes per track.
+ * Bit layout: bits[channel * 16 + note / 8] & (1 << (note % 8)) */
+typedef struct {
+    uint8_t bits[256];
+} active_notes_t;
+
+static inline void an_set(active_notes_t *an, uint8_t ch, uint8_t note) {
+    an->bits[ch * 16 + note / 8] |= (uint8_t)(1 << (note % 8));
+}
+
+static inline void an_clear(active_notes_t *an, uint8_t ch, uint8_t note) {
+    an->bits[ch * 16 + note / 8] &= (uint8_t)~(1 << (note % 8));
+}
+
+static inline void an_clear_all(active_notes_t *an) {
+    memset(an->bits, 0, sizeof(an->bits));
+}
+
 /* ── Track ───────────────────────────────────────────────────────── */
 
 typedef struct {
-    seq_pattern_t slots[2];
-    uint8_t       active_slot;
-    uint16_t      event_index;   /* current playback position */
-    bool          muted;
-    bool          soloed;
-    bool          pending_switch;
-    uint8_t       pending_slot;  /* slot to switch to at boundary */
+    seq_pattern_t  slots[2];
+    active_notes_t active_notes; /* notes currently sounding */
+    uint8_t        active_slot;
+    uint16_t       event_index;  /* current playback position */
+    bool           muted;
+    bool           soloed;
+    bool           pending_switch;
+    uint8_t        pending_slot; /* slot to switch to at boundary */
 } seq_track_t;
 
 /* ── Actor state ─────────────────────────────────────────────────── */
@@ -190,7 +211,7 @@ static void send_midi(runtime_t *rt, actor_id_t midi_id,
 }
 
 static void emit_event(runtime_t *rt, actor_id_t midi_id,
-                       const seq_event_t *ev) {
+                       const seq_event_t *ev, active_notes_t *an) {
     if (ev->flags & SEQ_FLAG_MUTED) return;
 
     switch (ev->type) {
@@ -199,6 +220,7 @@ static void emit_event(runtime_t *rt, actor_id_t midi_id,
         uint8_t vel  = ev->data.note.velocity;
         uint8_t ch   = ev->data.note.channel & 0x0F;
         send_midi(rt, midi_id, (uint8_t)(0x90 | ch), note, vel);
+        an_set(an, ch, note);
         break;
     }
     case SEQ_EVENT_NOTE_OFF: {
@@ -206,6 +228,7 @@ static void emit_event(runtime_t *rt, actor_id_t midi_id,
         uint8_t vel  = ev->data.note_off.velocity;
         uint8_t ch   = ev->data.note_off.channel & 0x0F;
         send_midi(rt, midi_id, (uint8_t)(0x80 | ch), note, vel);
+        an_clear(an, ch, note);
         break;
     }
     case SEQ_EVENT_CONTROL: {
@@ -242,9 +265,22 @@ static void emit_event(runtime_t *rt, actor_id_t midi_id,
     }
 }
 
-static void send_all_notes_off(runtime_t *rt, actor_id_t midi_id) {
-    for (uint8_t ch = 0; ch < 16; ch++)
-        send_midi(rt, midi_id, (uint8_t)(0xB0 | ch), 123, 0);
+/* Send Note Off for every active note in the bitmap, then clear it */
+static void kill_active_notes(runtime_t *rt, actor_id_t midi_id,
+                              active_notes_t *an) {
+    for (int ch = 0; ch < 16; ch++) {
+        for (int byte_idx = 0; byte_idx < 16; byte_idx++) {
+            uint8_t b = an->bits[ch * 16 + byte_idx];
+            if (b == 0) continue;
+            for (int bit = 0; bit < 8; bit++) {
+                if (b & (1 << bit)) {
+                    uint8_t note = (uint8_t)(byte_idx * 8 + bit);
+                    send_midi(rt, midi_id, (uint8_t)(0x80 | ch), note, 64);
+                }
+            }
+        }
+    }
+    an_clear_all(an);
 }
 
 /* ── Playback engine ─────────────────────────────────────────────── */
@@ -259,7 +295,7 @@ static void emit_events_in_range(runtime_t *rt, seq_state_t *s,
         const seq_event_t *ev = &pat->events[trk->event_index];
         if (ev->tick >= to) break;
         if (ev->tick >= from) {
-            emit_event(rt, s->midi_id, ev);
+            emit_event(rt, s->midi_id, ev, &trk->active_notes);
         }
         trk->event_index++;
     }
@@ -327,6 +363,7 @@ static void process_track_tick(runtime_t *rt, seq_state_t *s,
         emit_events_in_range(rt, s, trk, 0, len);
         /* Handle slot switch at boundary */
         if (trk->pending_switch) {
+            kill_active_notes(rt, s->midi_id, &trk->active_notes);
             trk->active_slot = trk->pending_slot;
             trk->pending_switch = false;
             pat = &trk->slots[trk->active_slot];
@@ -342,6 +379,7 @@ static void process_track_tick(runtime_t *rt, seq_state_t *s,
 
         /* Slot switch at boundary */
         if (trk->pending_switch) {
+            kill_active_notes(rt, s->midi_id, &trk->active_notes);
             trk->active_slot = trk->pending_slot;
             trk->pending_switch = false;
             pat = &trk->slots[trk->active_slot];
@@ -513,6 +551,7 @@ static void handle_start(seq_state_t *s, runtime_t *rt, message_t *msg) {
     for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
         s->tracks[i].event_index = 0;
         s->tracks[i].pending_switch = false;
+        an_clear_all(&s->tracks[i].active_notes);
     }
 
     if (!s->timer)
@@ -522,8 +561,10 @@ static void handle_start(seq_state_t *s, runtime_t *rt, message_t *msg) {
 }
 
 static void handle_stop(seq_state_t *s, runtime_t *rt, message_t *msg) {
-    if (s->playing)
-        send_all_notes_off(rt, s->midi_id);
+    if (s->playing) {
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+            kill_active_notes(rt, s->midi_id, &s->tracks[i].active_notes);
+    }
 
     s->playing = false;
     s->paused = false;
@@ -595,6 +636,12 @@ static void handle_set_position(seq_state_t *s, runtime_t *rt, message_t *msg) {
 
     const seq_position_payload_t *req =
         (const seq_position_payload_t *)msg->payload;
+
+    /* Kill any sounding notes before jumping */
+    if (s->playing) {
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+            kill_active_notes(rt, s->midi_id, &s->tracks[i].active_notes);
+    }
 
     s->current_tick = req->tick;
     s->prev_tick = req->tick;
@@ -689,6 +736,8 @@ static void handle_mute_track(seq_state_t *s, runtime_t *rt, message_t *msg) {
         return;
     }
     s->tracks[req->track].muted = req->muted;
+    if (req->muted && s->playing)
+        kill_active_notes(rt, s->midi_id, &s->tracks[req->track].active_notes);
     reply_ok(rt, msg->source);
 }
 
@@ -704,6 +753,15 @@ static void handle_solo_track(seq_state_t *s, runtime_t *rt, message_t *msg) {
     }
     s->tracks[req->track].soloed = req->soloed;
     rebuild_solo_mask(s);
+
+    /* Kill active notes on tracks that just became inaudible */
+    if (s->playing) {
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
+            if (!track_is_audible(s, i))
+                kill_active_notes(rt, s->midi_id, &s->tracks[i].active_notes);
+        }
+    }
+
     reply_ok(rt, msg->source);
 }
 

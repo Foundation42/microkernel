@@ -1006,6 +1006,20 @@ static bool has_note_on(const uint8_t *buf, int len, uint8_t note) {
     return count_note_ons(buf, len, note) > 0;
 }
 
+/* Helper: check if any Note Off (0x8n) for a given note exists */
+static bool has_note_off(const uint8_t *buf, int len, uint8_t note) {
+    for (int i = 0; i + 2 < len; ) {
+        uint8_t status = buf[i];
+        if ((status & 0xF0) == 0x80 && buf[i + 1] == note)
+            return true;
+        if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0)
+            i += 2;
+        else
+            i += 3;
+    }
+    return false;
+}
+
 /* ── test_multi_track_load ───────────────────────────────────────── */
 
 static bool mt_load_tester(runtime_t *rt, actor_t *self,
@@ -1992,6 +2006,233 @@ static int test_empty_track_skip(void) {
     return 0;
 }
 
+/* ── test_solo_kills_hanging_notes ────────────────────────────────── */
+/*
+ * Track 0: long note C4 (8 beats).  Track 1: short note E4 (1 beat).
+ * Start playback, wait for both notes to sound, then solo track 1.
+ * Track 0's C4 should get a Note Off (0x80 nn) — no hanging note.
+ */
+static bool solo_kill_tester(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Track 0: C4, 4-beat note in 8-beat pattern (note-off at tick 1920,
+         * well before pattern end so it doesn't wrap to tick 0) */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN * 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN * 8, "long_note", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Track 1: E4, 1-beat note in 8-beat pattern */
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN * 8, "short_note", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        /* Disable loop so pattern doesn't wrap and re-trigger */
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        /* Fast tempo so notes fire quickly */
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 }; /* 600 BPM */
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        /* Wait 50ms for both notes to sound */
+        actor_set_timer(rt, 50, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 7) {
+        s->step = 8;
+        /* Clear TX buffer, then solo track 1 — should kill track 0's C4 */
+        midi_mock_clear_tx();
+        seq_solo_payload_t sp = { .track = 1, .soloed = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_SOLO_TRACK, &sp, sizeof(sp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 8) {
+        s->step = 9;
+        /* Give a tick for the note-off to be sent */
+        actor_set_timer(rt, 20, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 9) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_solo_kills_hanging_notes(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, solo_kill_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.done);
+
+    /* After solo, TX buffer should contain Note Off for C4 (note 60) */
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    ASSERT(has_note_off(txbuf, txn, 60));
+
+    /* Track 1's E4 should NOT get a Note Off from the solo action
+     * (it's the soloed track, its notes should remain) */
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_mute_kills_hanging_notes ───────────────────────────────── */
+
+static bool mute_kill_tester(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Track 0: C4, 4-beat note in 8-beat pattern */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN * 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN * 8, "long_note", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        /* Wait for note to sound */
+        actor_set_timer(rt, 50, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 6) {
+        s->step = 7;
+        /* Clear TX, then mute track 0 — should kill C4 */
+        midi_mock_clear_tx();
+        seq_mute_payload_t mp = { .track = 0, .muted = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_MUTE_TRACK, &mp, sizeof(mp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 7) {
+        s->step = 8;
+        actor_set_timer(rt, 20, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 8) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_mute_kills_hanging_notes(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, mute_kill_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.done);
+
+    /* After mute, TX buffer should contain Note Off for C4 */
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    ASSERT(has_note_off(txbuf, txn, 60));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
 /* ── Main ────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -2019,6 +2260,10 @@ int main(void) {
     RUN_TEST(test_mute_unmute_toggle);
     RUN_TEST(test_solo_mask_cleared);
     RUN_TEST(test_empty_track_skip);
+
+    /* Active note tracking */
+    RUN_TEST(test_solo_kills_hanging_notes);
+    RUN_TEST(test_mute_kills_hanging_notes);
 
     TEST_REPORT();
 }
