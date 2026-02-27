@@ -34,6 +34,7 @@ scheduler with integrated I/O polling.
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Display + ANSI console** -- multi-board display stack with HAL abstraction: 466x466 AMOLED (SH8601 QSPI) and 800x480 LCD (ST7262 RGB parallel); 8x16 font rendering, virtual terminal with dynamic grid sizing (58x29 or 100x30), ANSI escape sequence parsing, dirty-row tracking; dashboard auto-adapts layout (circular bezel margins vs full-width rectangular); board selected at build time via `idf.py menuconfig`
 - **MIDI** -- full MIDI actor for SC16IS752 UART-to-I2C bridge (31250 baud); hardware reset via GPIO, interrupt-driven receive with byte parser (running status, SysEx, real-time interleaving), subscriber dispatch with channel/message filtering; MIDI monitor actor (human-readable traffic logging); arpeggiator actor (UP/DOWN/UPDOWN/RANDOM patterns, 1-4 octave range, BPM-driven 16th-note stepping, legato output, enable/disable); note sequence player with configurable BPM/velocity/channel
+- **MIDI sequencer** -- pattern-based sequencer actor with 480 PPQN timing, 16-byte packed event format (note/CC/program/pitch-bend/aftertouch/tempo), microtonal pitch support, note-off pre-expansion at load time, wall-clock tick calculation (integer math, no floats), timer-driven playback with loop/pause/seek/tempo control; foundation for multi-track recording and AI-driven pattern generation
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, display, and interactive shell
@@ -46,7 +47,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-46 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
+47 tests pass. OpenSSL is detected automatically; if absent, TLS URLs return errors
 while everything else works. WASM support requires clang for compiling `.wasm` test
 modules and optionally `wat2wasm` (from wabt) for zero-linear-memory WAT modules.
 The WAMR submodule auto-initializes on first build.
@@ -308,7 +309,8 @@ Commands: `help`, `list`, `info` (alias `top`), `self`, `whoami`,
 `call <name-or-id> <type> [data|x:hex]`, `stop <name-or-id>`,
 `register <name>`, `lookup <name>`, `ls [/prefix]`,
 `mount <host>[:<port>]`, `caps [target]`,
-`midi <configure|note|cc|pc|send|play|stop|monitor|arp|status>`, `exit`
+`midi <configure|note|cc|pc|send|play|stop|monitor|arp|status>`,
+`seq <start|stop|pause|tempo|status|demo>`, `exit`
 
 The `send` and `call` commands accept an optional `x:` prefix on the payload to
 send hex-encoded binary data (e.g., `call led 4278190145 x:0000ff000000` sends
@@ -482,13 +484,13 @@ include/microkernel/    Public headers (types, runtime, actor, message, services
                         transport, http, mk_socket, mk_readline, shell,
                         supervision, wasm_actor, namespace, cf_proxy,
                         gpio, i2c, pwm, led, display, console, dashboard,
-                        midi, midi_monitor, arpeggiator)
+                        midi, midi_monitor, arpeggiator, sequencer)
 src/                    Implementation (runtime, actors, transports, HTTP state
                         machine, supervision, wasm_actor, hot reload, namespace,
                         cf_proxy, local_kv, state_persist, shell, readline,
-                        hardware actors, MIDI actor + monitor + arpeggiator,
+                        hardware actors, MIDI actor + monitor + arpeggiator + sequencer,
                         HAL interfaces + Linux mocks, wire format, utilities)
-tests/                  46 unit/integration tests + realworld tests + benchmarks
+tests/                  47 unit/integration tests + realworld tests + benchmarks
 tests/wasm_modules/     WASM test module source (C and WAT)
 tools/shell/            Shell driver (C console actor + mk-shell binary)
 third_party/wamr/       WAMR submodule (pinned to WAMR-2.2.0)

@@ -43,6 +43,7 @@ add_library(microkernel STATIC
     midi_hal_linux.c
     midi_monitor_actor.c
     arpeggiator_actor.c
+    sequencer_actor.c
 )
 
 target_include_directories(microkernel PUBLIC

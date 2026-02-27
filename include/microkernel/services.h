@@ -114,6 +114,20 @@
 #define MSG_MIDI_EVENT         ((msg_type_t)0xFF00007C)
 #define MSG_MIDI_SYSEX_EVENT   ((msg_type_t)0xFF00007D)
 
+/* Phase 29: Sequencer actor */
+#define MSG_SEQ_LOAD_PATTERN   ((msg_type_t)0xFF000080)
+#define MSG_SEQ_START          ((msg_type_t)0xFF000081)
+#define MSG_SEQ_STOP           ((msg_type_t)0xFF000082)
+#define MSG_SEQ_PAUSE          ((msg_type_t)0xFF000083)
+#define MSG_SEQ_SET_TEMPO      ((msg_type_t)0xFF000084)
+#define MSG_SEQ_SET_POSITION   ((msg_type_t)0xFF000085)
+#define MSG_SEQ_SET_LOOP       ((msg_type_t)0xFF000086)
+/* 0xFF000087–0xFF00008F reserved for sequencer extensions */
+#define MSG_SEQ_OK             ((msg_type_t)0xFF000090)
+#define MSG_SEQ_ERROR          ((msg_type_t)0xFF000091)
+#define MSG_SEQ_STATUS         ((msg_type_t)0xFF000092)
+#define MSG_SEQ_POSITION       ((msg_type_t)0xFF000093)
+
 /* ── Timer payload ─────────────────────────────────────────────────── */
 
 typedef struct {

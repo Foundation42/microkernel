@@ -13,6 +13,7 @@
 #include "microkernel/midi.h"
 #include "microkernel/midi_monitor.h"
 #include "microkernel/arpeggiator.h"
+#include "microkernel/sequencer.h"
 #include "midi_hal.h"
 #include <stdio.h>
 #include <string.h>
@@ -153,6 +154,7 @@ static void cmd_help(void) {
         "  mount <host>[:<port>]  Connect to remote node\n"
 #endif
         "  midi [help]       MIDI commands (configure, send, monitor, arp)\n"
+        "  seq [help]        Sequencer commands (start, stop, tempo, demo)\n"
         "  caps [target]     Query node capabilities\n"
         "  exit              Exit shell\n"
     );
@@ -1118,6 +1120,106 @@ static void cmd_midi(runtime_t *rt, const char *args, shell_state_t *sh) {
     printf("Unknown MIDI command: %s (try 'midi help')\n", sub);
 }
 
+/* ── seq command ─────────────────────────────────────────────────── */
+
+static void cmd_seq(runtime_t *rt, const char *args) {
+    char sub[32];
+    args = next_word(args, sub, sizeof(sub));
+
+    if (sub[0] == '\0' || strcmp(sub, "help") == 0) {
+        printf(
+            "Sequencer commands:\n"
+            "  seq start         Start playback\n"
+            "  seq stop          Stop playback\n"
+            "  seq pause         Pause/resume toggle\n"
+            "  seq tempo <bpm>   Set tempo (BPM)\n"
+            "  seq status        Show sequencer status\n"
+            "  seq demo          Load C major scale demo pattern\n"
+        );
+        return;
+    }
+
+    /* Ensure sequencer exists */
+    actor_id_t seq = actor_lookup(rt, "/sys/sequencer");
+    if (seq == ACTOR_ID_INVALID) {
+        /* Try to spawn it */
+        seq = sequencer_init(rt);
+        if (seq == ACTOR_ID_INVALID) {
+            printf("Sequencer init failed (MIDI actor not found?)\n");
+            return;
+        }
+        printf("Sequencer spawned\n");
+    }
+
+    if (strcmp(sub, "start") == 0) {
+        actor_send(rt, seq, MSG_SEQ_START, NULL, 0);
+        printf("Sequencer started\n");
+        return;
+    }
+
+    if (strcmp(sub, "stop") == 0) {
+        actor_send(rt, seq, MSG_SEQ_STOP, NULL, 0);
+        printf("Sequencer stopped\n");
+        return;
+    }
+
+    if (strcmp(sub, "pause") == 0) {
+        actor_send(rt, seq, MSG_SEQ_PAUSE, NULL, 0);
+        printf("Sequencer pause toggled\n");
+        return;
+    }
+
+    if (strcmp(sub, "tempo") == 0) {
+        char val[16];
+        next_word(args, val, sizeof(val));
+        if (val[0] == '\0') {
+            printf("Usage: seq tempo <bpm>\n");
+            return;
+        }
+        float bpm = (float)atof(val);
+        if (bpm <= 0 || bpm > 300) {
+            printf("BPM must be 1–300\n");
+            return;
+        }
+        seq_tempo_payload_t tp = { .bpm_x100 = (uint32_t)(bpm * 100) };
+        actor_send(rt, seq, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        printf("Tempo set to %.1f BPM\n", bpm);
+        return;
+    }
+
+    if (strcmp(sub, "status") == 0) {
+        actor_send(rt, seq, MSG_SEQ_STATUS, NULL, 0);
+        /* Reply will print when received */
+        printf("(status request sent)\n");
+        return;
+    }
+
+    if (strcmp(sub, "demo") == 0) {
+        /* C major scale as 8th notes */
+        uint8_t notes[] = { 60, 62, 64, 65, 67, 69, 71, 72 };
+        int n = (int)(sizeof(notes) / sizeof(notes[0]));
+        seq_event_t events[8];
+        for (int i = 0; i < n; i++)
+            events[i] = seq_note((tick_t)(i * SEQ_PPQN / 2), notes[i],
+                                 100, SEQ_PPQN / 2 - 10, 0);
+
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN * 4, "C major scale", events, (uint16_t)n);
+        if (!p) {
+            printf("Out of memory\n");
+            return;
+        }
+        actor_send(rt, seq, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size((uint16_t)n));
+        free(p);
+        printf("Demo pattern loaded (C major scale, 2 bars 8th notes)\n");
+        printf("Use 'seq start' to play, 'seq tempo 120' to set speed\n");
+        return;
+    }
+
+    printf("Unknown seq command: %s (try 'seq help')\n", sub);
+}
+
 static void cmd_caps(runtime_t *rt, const char *args) {
     char target_str[64];
     next_word(args, target_str, sizeof(target_str));
@@ -1176,6 +1278,8 @@ static void dispatch_command(runtime_t *rt, shell_state_t *sh,
         cmd_info(rt);
     } else if (strcmp(cmd, "midi") == 0) {
         cmd_midi(rt, rest, sh);
+    } else if (strcmp(cmd, "seq") == 0) {
+        cmd_seq(rt, rest);
     } else if (strcmp(cmd, "caps") == 0) {
         cmd_caps(rt, rest);
     } else if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "quit") == 0) {
