@@ -1,7 +1,8 @@
 /* sequencer_actor.c — Pattern-based MIDI sequencer with timer-driven playback.
  *
- * Single-track playback engine (Phase 1): 480 PPQN, wall-clock tick
- * calculation, note-off pre-expansion, loop support.
+ * Multi-track playback engine (Phase 2): 480 PPQN, wall-clock tick
+ * calculation, note-off pre-expansion, loop support, per-track wrapping,
+ * mute/solo, double-buffer slot switching.
  */
 
 #include "microkernel/sequencer.h"
@@ -53,6 +54,9 @@ typedef struct {
     uint8_t       active_slot;
     uint16_t      event_index;   /* current playback position */
     bool          muted;
+    bool          soloed;
+    bool          pending_switch;
+    uint8_t       pending_slot;  /* slot to switch to at boundary */
 } seq_track_t;
 
 /* ── Actor state ─────────────────────────────────────────────────── */
@@ -63,10 +67,12 @@ typedef struct {
 
     bool         playing;
     bool         paused;
+    uint8_t      solo_mask;     /* bitmask of soloed tracks */
 
     /* Tempo and timing */
     uint32_t     bpm_x100;      /* BPM × 100 (e.g. 12000 = 120 BPM) */
     tick_t       current_tick;
+    tick_t       prev_tick;     /* tick at last handle_tick call */
     uint64_t     start_time_us;  /* wall clock at play start */
     uint64_t     pause_time_us;  /* wall clock when paused */
 
@@ -259,52 +265,144 @@ static void emit_events_in_range(runtime_t *rt, seq_state_t *s,
     }
 }
 
+/* Check if a track should produce audio given mute/solo state */
+static bool track_is_audible(const seq_state_t *s, int track_idx) {
+    const seq_track_t *trk = &s->tracks[track_idx];
+    if (trk->muted) return false;
+    if (s->solo_mask != 0 && !trk->soloed) return false;
+    return true;
+}
+
+/* Get the max pattern length across all tracks that have patterns */
+static tick_t max_pattern_length(const seq_state_t *s) {
+    tick_t max_len = 0;
+    for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
+        const seq_pattern_t *pat = &s->tracks[i].slots[s->tracks[i].active_slot];
+        if (pat->events && pat->event_count > 0 && pat->length > max_len)
+            max_len = pat->length;
+    }
+    return max_len;
+}
+
+/* Seek a track's event_index to match a local tick position */
+static void seek_track(seq_track_t *trk, tick_t local_tick) {
+    seq_pattern_t *pat = &trk->slots[trk->active_slot];
+    trk->event_index = 0;
+    if (pat->events) {
+        while (trk->event_index < pat->event_count &&
+               pat->events[trk->event_index].tick < local_tick) {
+            trk->event_index++;
+        }
+    }
+}
+
+/* Process one track for a tick interval [prev_tick, new_tick).
+ * Non-looping: raw ticks clamped to pattern length (no wrapping).
+ * Looping: per-track modulo wrapping for polyrhythm support. */
+static void process_track_tick(runtime_t *rt, seq_state_t *s,
+                               int track_idx,
+                               tick_t prev_tick, tick_t new_tick) {
+    seq_track_t *trk = &s->tracks[track_idx];
+    seq_pattern_t *pat = &trk->slots[trk->active_slot];
+    if (!pat->events || pat->event_count == 0 || pat->length == 0) return;
+    if (!track_is_audible(s, track_idx)) return;
+
+    tick_t len = pat->length;
+
+    if (!s->loop_enabled) {
+        /* Non-looping: emit in [prev_tick, min(new_tick, len)) — no wrapping */
+        if (prev_tick >= len) return;
+        tick_t capped = (new_tick > len) ? len : new_tick;
+        emit_events_in_range(rt, s, trk, prev_tick, capped);
+        return;
+    }
+
+    /* Looping: per-track modulo wrapping */
+    tick_t local_from = prev_tick % len;
+    tick_t local_to   = new_tick % len;
+
+    if (new_tick > prev_tick && (new_tick - prev_tick) >= len) {
+        /* Jumped more than one full pattern — emit everything once */
+        trk->event_index = 0;
+        emit_events_in_range(rt, s, trk, 0, len);
+        /* Handle slot switch at boundary */
+        if (trk->pending_switch) {
+            trk->active_slot = trk->pending_slot;
+            trk->pending_switch = false;
+            pat = &trk->slots[trk->active_slot];
+        }
+        seek_track(trk, local_to);
+        return;
+    }
+
+    if (local_to < local_from || (new_tick > prev_tick && local_to == local_from
+                                   && new_tick != prev_tick)) {
+        /* Boundary crossing: pattern wrapped */
+        emit_events_in_range(rt, s, trk, local_from, len);
+
+        /* Slot switch at boundary */
+        if (trk->pending_switch) {
+            trk->active_slot = trk->pending_slot;
+            trk->pending_switch = false;
+            pat = &trk->slots[trk->active_slot];
+        }
+
+        trk->event_index = 0;
+        emit_events_in_range(rt, s, trk, 0, local_to);
+    } else {
+        emit_events_in_range(rt, s, trk, local_from, local_to);
+    }
+}
+
 static void handle_tick(runtime_t *rt, seq_state_t *s) {
     if (!s->playing || s->paused) return;
 
     uint64_t elapsed = now_us() - s->start_time_us;
     tick_t new_tick = calc_tick(elapsed, s->bpm_x100);
 
-    /* Process track 0 (single-track for Phase 1) */
-    seq_track_t *trk = &s->tracks[0];
-    seq_pattern_t *pat = &trk->slots[trk->active_slot];
-    if (!pat->events || pat->event_count == 0) return;
+    tick_t max_len = max_pattern_length(s);
+    if (max_len == 0) return;
 
-    tick_t effective_end = s->loop_end > 0 ? s->loop_end : pat->length;
+    tick_t effective_end = s->loop_end > 0 ? s->loop_end : max_len;
 
     if (s->loop_enabled && effective_end > 0 && new_tick >= effective_end) {
-        /* Emit remaining events up to loop end */
-        emit_events_in_range(rt, s, trk, s->current_tick, effective_end);
+        /* Process all tracks up to loop end before wrapping */
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+            process_track_tick(rt, s, i, s->prev_tick, effective_end);
 
-        /* Wrap */
+        /* Global wrap */
         tick_t loop_len = effective_end - s->loop_start;
-        if (loop_len == 0) loop_len = 1; /* prevent infinite loop */
+        if (loop_len == 0) loop_len = 1;
 
-        /* Re-anchor start time to the loop point */
         uint64_t ticks_past_end = new_tick - effective_end;
         tick_t wrapped_ticks = ticks_past_end % loop_len;
         new_tick = s->loop_start + wrapped_ticks;
 
-        /* Recalculate start_time_us so calc_tick returns new_tick now */
-        /* new_tick = elapsed' * bpm_x100 * PPQN / 6000000000 */
-        /* elapsed' = new_tick * 6000000000 / (bpm_x100 * PPQN) */
+        /* Re-anchor start_time_us */
         uint64_t needed_us = (uint64_t)new_tick * 6000000000ULL /
                              ((uint64_t)s->bpm_x100 * SEQ_PPQN);
         s->start_time_us = now_us() - needed_us;
 
-        trk->event_index = 0;
-        /* Advance event_index past events before new_tick */
-        while (trk->event_index < pat->event_count &&
-               pat->events[trk->event_index].tick < new_tick) {
-            trk->event_index++;
+        /* Re-seek all tracks to loop start and emit up to wrapped position */
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
+            seq_track_t *trk = &s->tracks[i];
+            seq_pattern_t *pat = &trk->slots[trk->active_slot];
+            if (pat->events && pat->event_count > 0 && pat->length > 0) {
+                tick_t local_start = s->loop_start % pat->length;
+                seek_track(trk, local_start);
+            }
         }
 
-        /* Emit events at the wrap point */
-        emit_events_in_range(rt, s, trk, new_tick, new_tick + 1);
+        /* Emit events from loop start to wrapped position */
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+            process_track_tick(rt, s, i, s->loop_start, new_tick + 1);
     } else {
-        emit_events_in_range(rt, s, trk, s->current_tick, new_tick);
+        /* Normal tick: process all tracks */
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+            process_track_tick(rt, s, i, s->prev_tick, new_tick);
     }
 
+    s->prev_tick = new_tick;
     s->current_tick = new_tick;
 
     /* Auto-stop if not looping and past end */
@@ -396,9 +494,12 @@ static void handle_start(seq_state_t *s, runtime_t *rt, message_t *msg) {
     if (s->playing && !s->paused) {
         /* Already playing — restart from beginning */
         s->current_tick = s->loop_start;
+        s->prev_tick = s->loop_start;
         s->start_time_us = now_us();
-        for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+        for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
             s->tracks[i].event_index = 0;
+            s->tracks[i].pending_switch = false;
+        }
         reply_ok(rt, msg->source);
         return;
     }
@@ -406,10 +507,13 @@ static void handle_start(seq_state_t *s, runtime_t *rt, message_t *msg) {
     s->playing = true;
     s->paused = false;
     s->current_tick = s->loop_start;
+    s->prev_tick = s->loop_start;
     s->start_time_us = now_us();
 
-    for (int i = 0; i < SEQ_MAX_TRACKS; i++)
+    for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
         s->tracks[i].event_index = 0;
+        s->tracks[i].pending_switch = false;
+    }
 
     if (!s->timer)
         s->timer = actor_set_timer(rt, SEQ_TICK_MS, true);
@@ -493,22 +597,22 @@ static void handle_set_position(seq_state_t *s, runtime_t *rt, message_t *msg) {
         (const seq_position_payload_t *)msg->payload;
 
     s->current_tick = req->tick;
+    s->prev_tick = req->tick;
 
     /* Re-anchor start time */
     uint64_t needed_us = (uint64_t)req->tick * 6000000000ULL /
                          ((uint64_t)s->bpm_x100 * SEQ_PPQN);
     s->start_time_us = now_us() - needed_us;
 
-    /* Reset event indices to match new position */
+    /* Reset event indices to match new position (per-track local tick) */
     for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
         seq_track_t *trk = &s->tracks[i];
         seq_pattern_t *pat = &trk->slots[trk->active_slot];
-        trk->event_index = 0;
-        if (pat->events) {
-            while (trk->event_index < pat->event_count &&
-                   pat->events[trk->event_index].tick < req->tick) {
-                trk->event_index++;
-            }
+        if (pat->events && pat->event_count > 0 && pat->length > 0) {
+            tick_t local = req->tick % pat->length;
+            seek_track(trk, local);
+        } else {
+            trk->event_index = 0;
         }
     }
 
@@ -538,12 +642,101 @@ static void handle_status_request(seq_state_t *s, runtime_t *rt,
     status.looping = s->loop_enabled;
     status.bpm_x100 = s->bpm_x100;
     status.current_tick = s->current_tick;
+    status.solo_mask = s->solo_mask;
 
-    seq_pattern_t *pat = &s->tracks[0].slots[s->tracks[0].active_slot];
-    status.pattern_length = pat->length;
-    status.event_count = pat->event_count;
+    /* Track 0 for backward compat */
+    seq_pattern_t *pat0 = &s->tracks[0].slots[s->tracks[0].active_slot];
+    status.pattern_length = pat0->length;
+    status.event_count = pat0->event_count;
+
+    /* Per-track status */
+    uint8_t track_count = 0;
+    for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
+        seq_track_t *trk = &s->tracks[i];
+        seq_pattern_t *pat = &trk->slots[trk->active_slot];
+        status.tracks[i].pattern_length = pat->length;
+        status.tracks[i].event_count = pat->event_count;
+        status.tracks[i].active_slot = trk->active_slot;
+        status.tracks[i].muted = trk->muted;
+        status.tracks[i].soloed = trk->soloed;
+        status.tracks[i].pending_switch = trk->pending_switch;
+        if (pat->events && pat->event_count > 0)
+            track_count++;
+    }
+    status.track_count = track_count;
 
     actor_send(rt, msg->source, MSG_SEQ_STATUS, &status, sizeof(status));
+}
+
+/* ── Mute / Solo / Slot switch handlers ──────────────────────────── */
+
+static void rebuild_solo_mask(seq_state_t *s) {
+    s->solo_mask = 0;
+    for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
+        if (s->tracks[i].soloed)
+            s->solo_mask |= (uint8_t)(1 << i);
+    }
+}
+
+static void handle_mute_track(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_mute_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_mute_payload_t *req = (const seq_mute_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    s->tracks[req->track].muted = req->muted;
+    reply_ok(rt, msg->source);
+}
+
+static void handle_solo_track(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_solo_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_solo_payload_t *req = (const seq_solo_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    s->tracks[req->track].soloed = req->soloed;
+    rebuild_solo_mask(s);
+    reply_ok(rt, msg->source);
+}
+
+static void handle_switch_slot(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_switch_slot_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_switch_slot_payload_t *req =
+        (const seq_switch_slot_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    if (req->slot > 1) {
+        reply_error(rt, msg->source, "slot must be 0 or 1");
+        return;
+    }
+    seq_track_t *trk = &s->tracks[req->track];
+    /* Validate target slot has a pattern */
+    seq_pattern_t *pat = &trk->slots[req->slot];
+    if (!pat->events || pat->event_count == 0) {
+        reply_error(rt, msg->source, "target slot has no pattern");
+        return;
+    }
+    if (trk->active_slot == req->slot) {
+        /* Already on this slot, nothing to do */
+        reply_ok(rt, msg->source);
+        return;
+    }
+    trk->pending_switch = true;
+    trk->pending_slot = req->slot;
+    reply_ok(rt, msg->source);
 }
 
 /* ── Actor behavior ──────────────────────────────────────────────── */
@@ -573,6 +766,9 @@ static bool seq_behavior(runtime_t *rt, actor_t *self,
     case MSG_SEQ_SET_TEMPO:    handle_set_tempo(s, rt, msg);      break;
     case MSG_SEQ_SET_POSITION: handle_set_position(s, rt, msg);   break;
     case MSG_SEQ_SET_LOOP:     handle_set_loop(s, rt, msg);       break;
+    case MSG_SEQ_MUTE_TRACK:   handle_mute_track(s, rt, msg);    break;
+    case MSG_SEQ_SOLO_TRACK:   handle_solo_track(s, rt, msg);    break;
+    case MSG_SEQ_SWITCH_SLOT:  handle_switch_slot(s, rt, msg);   break;
     case MSG_SEQ_STATUS:       handle_status_request(s, rt, msg); break;
     default: break;
     }

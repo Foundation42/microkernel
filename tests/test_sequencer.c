@@ -982,6 +982,1016 @@ static int test_cc_and_program(void) {
     return 0;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  Phase 29.2 — Multi-track tests
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Helper: count Note On events for a given MIDI note in TX buffer */
+static int count_note_ons(const uint8_t *buf, int len, uint8_t note) {
+    int count = 0;
+    for (int i = 0; i + 2 < len; ) {
+        uint8_t status = buf[i];
+        if ((status & 0xF0) == 0x90 && buf[i + 1] == note && buf[i + 2] > 0)
+            count++;
+        if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0)
+            i += 2;
+        else
+            i += 3;
+    }
+    return count;
+}
+
+/* Helper: check if any Note On for a given note exists */
+static bool has_note_on(const uint8_t *buf, int len, uint8_t note) {
+    return count_note_ons(buf, len, note) > 0;
+}
+
+/* ── test_multi_track_load ───────────────────────────────────────── */
+
+static bool mt_load_tester(runtime_t *rt, actor_t *self,
+                           message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Load track 0, slot 0 */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 2, 0);
+        seq_load_payload_t *p0 = seq_build_load_payload(
+            0, 0, SEQ_TICKS_PER_BAR, "track0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p0, seq_load_payload_size(1));
+        free(p0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Load track 1, slot 0 */
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 2, 1);
+        seq_load_payload_t *p1 = seq_build_load_payload(
+            1, 0, SEQ_TICKS_PER_BAR, "track1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p1, seq_load_payload_size(1));
+        free(p1);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->ok_count = 2;  /* Both loaded OK */
+        s->got_ok = true;
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_multi_track_load(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, mt_load_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.got_ok);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_multi_track_playback ───────────────────────────────────── */
+
+static bool mt_play_tester(runtime_t *rt, actor_t *self,
+                           message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Track 0: C4 (60) on ch 0 */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN, "t0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Track 1: E4 (64) on ch 1 */
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 4, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN, "t1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 7) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_multi_track_playback(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, mt_play_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* Both tracks should have played: note 60 (ch0) and note 64 (ch1) */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(has_note_on(txbuf, txn, 64));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_polyrhythm ─────────────────────────────────────────────── */
+
+static bool polyrhythm_tester(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Track 0: 2-beat pattern (note 60), loops 3 times in 6 beats */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN * 2, "2beat", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Track 1: 3-beat pattern (note 64), loops 2 times in 6 beats */
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 4, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN * 3, "3beat", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        /* Loop enabled, end at 6 beats = LCM(2,3) */
+        seq_loop_payload_t lp = { .enabled = true, .start_tick = 0,
+                                  .end_tick = SEQ_PPQN * 6 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        midi_mock_clear_tx();
+        /* 1200 BPM: beat = 50ms, 6 beats = 300ms. Run for 400ms = >1 full cycle */
+        seq_tempo_payload_t tp = { .bpm_x100 = 120000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        actor_set_timer(rt, 400, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 7) {
+        s->step = 8;
+        actor_send(rt, s->seq_id, MSG_SEQ_STOP, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 8) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_polyrhythm(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, polyrhythm_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[512];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* 2-beat pattern loops 3 times in 6 beats → note 60 should fire 3+ times
+     * 3-beat pattern loops 2 times in 6 beats → note 64 should fire 2+ times */
+    int n60 = count_note_ons(txbuf, txn, 60);
+    int n64 = count_note_ons(txbuf, txn, 64);
+
+    ASSERT(n60 >= 3);
+    ASSERT(n64 >= 2);
+    /* Polyrhythm: 2-beat fires more often than 3-beat */
+    ASSERT(n60 > n64);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_track_mute ─────────────────────────────────────────────── */
+
+static bool mute_tester(runtime_t *rt, actor_t *self,
+                        message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Track 0: note 60 */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN, "t0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Track 1: note 64 */
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 4, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN, "t1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        /* Mute track 1 */
+        seq_mute_payload_t mp = { .track = 1, .muted = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_MUTE_TRACK, &mp, sizeof(mp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 7) {
+        s->step = 8;
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 8) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_track_mute(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, mute_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* Track 0 should play, track 1 muted → no note 64 */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(!has_note_on(txbuf, txn, 64));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_track_solo ─────────────────────────────────────────────── */
+
+static bool solo_tester(runtime_t *rt, actor_t *self,
+                        message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN, "t0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 4, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN, "t1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        /* Solo track 1 → only track 1 should play */
+        seq_solo_payload_t sp = { .track = 1, .soloed = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_SOLO_TRACK, &sp, sizeof(sp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 7) {
+        s->step = 8;
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 8) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_track_solo(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, solo_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* Only soloed track 1 (note 64) should play, not track 0 (note 60) */
+    ASSERT(!has_note_on(txbuf, txn, 60));
+    ASSERT(has_note_on(txbuf, txn, 64));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_double_buffer_load ─────────────────────────────────────── */
+
+static bool dbl_buf_tester(runtime_t *rt, actor_t *self,
+                           message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Load slot 0 on track 0 */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 2, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_TICKS_PER_BAR, "slot0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Load slot 1 on track 0 */
+        seq_event_t ev1 = seq_note(0, 72, 100, SEQ_PPQN / 2, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 1, SEQ_TICKS_PER_BAR, "slot1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->got_ok = true;
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_double_buffer_load(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, dbl_buf_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.got_ok);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_slot_switch ────────────────────────────────────────────── */
+
+static bool slot_switch_tester(runtime_t *rt, actor_t *self,
+                               message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Slot 0: note 60, short pattern (half beat) */
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 8, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN / 2, "slot0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Slot 1: note 72, same short pattern */
+        seq_event_t ev1 = seq_note(0, 72, 100, SEQ_PPQN / 8, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 1, SEQ_PPQN / 2, "slot1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        midi_mock_clear_tx();
+        /* Loop enabled, 1200 BPM: half beat = 25ms */
+        seq_tempo_payload_t tp = { .bpm_x100 = 120000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        /* Queue switch to slot 1 AFTER start (start clears pending_switch) */
+        seq_switch_slot_payload_t sw = { .track = 0, .slot = 1 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SWITCH_SLOT, &sw, sizeof(sw));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        /* Wait for boundary crossing to trigger switch */
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 7) {
+        s->step = 8;
+        actor_send(rt, s->seq_id, MSG_SEQ_STOP, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 8) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_slot_switch(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, slot_switch_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[512];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* After boundary switch, note 72 (slot 1) should appear in output */
+    ASSERT(has_note_on(txbuf, txn, 72));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_mute_unmute_toggle ─────────────────────────────────────── */
+
+static bool mute_toggle_tester(runtime_t *rt, actor_t *self,
+                               message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 8, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN / 2, "t0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        /* Mute track 0 */
+        seq_mute_payload_t mp = { .track = 0, .muted = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_MUTE_TRACK, &mp, sizeof(mp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 120000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        /* Play muted for 100ms → no notes */
+        actor_set_timer(rt, 100, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 6) {
+        s->step = 7;
+        /* Verify: no notes while muted */
+        uint8_t txbuf[128];
+        int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+        if (has_note_on(txbuf, txn, 60)) {
+            /* Failed — note played while muted */
+            s->got_error = true;
+        }
+        midi_mock_clear_tx();
+        /* Unmute */
+        seq_mute_payload_t mp = { .track = 0, .muted = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_MUTE_TRACK, &mp, sizeof(mp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 7) {
+        s->step = 8;
+        /* Play unmuted for 100ms → notes should appear */
+        actor_set_timer(rt, 100, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 8) {
+        s->step = 9;
+        actor_send(rt, s->seq_id, MSG_SEQ_STOP, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 9) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_mute_unmute_toggle(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, mute_toggle_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    /* No notes while muted (got_error check in behavior) */
+    ASSERT(!ts.got_error);
+
+    /* Notes should have played after unmute */
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    ASSERT(has_note_on(txbuf, txn, 60));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_solo_mask_cleared ──────────────────────────────────────── */
+
+static bool solo_clear_tester(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        seq_event_t ev0 = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, SEQ_PPQN, "t0", &ev0, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        seq_event_t ev1 = seq_note(0, 64, 100, SEQ_PPQN / 4, 1);
+        seq_load_payload_t *p = seq_build_load_payload(
+            1, 0, SEQ_PPQN, "t1", &ev1, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        /* Solo track 1 */
+        seq_solo_payload_t sp = { .track = 1, .soloed = true };
+        actor_send(rt, s->seq_id, MSG_SEQ_SOLO_TRACK, &sp, sizeof(sp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        /* Unsolo track 1 → both tracks should play */
+        seq_solo_payload_t sp = { .track = 1, .soloed = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SOLO_TRACK, &sp, sizeof(sp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 6) {
+        s->step = 7;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 7) {
+        s->step = 8;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 8) {
+        s->step = 9;
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 9) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_solo_mask_cleared(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, solo_clear_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* After unsolo, both tracks should play */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(has_note_on(txbuf, txn, 64));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_empty_track_skip ───────────────────────────────────────── */
+
+static bool empty_skip_tester(runtime_t *rt, actor_t *self,
+                              message_t *msg, void *state) {
+    (void)self;
+    seq_tester_t *s = state;
+
+    if (msg->type == 1 && s->step == 0) {
+        s->step = 1;
+        send_midi_config(rt, s->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && s->step == 1) {
+        s->step = 2;
+        /* Load ONLY on track 3, leaving tracks 0-2 and 4-7 empty */
+        seq_event_t ev = seq_note(0, 67, 100, SEQ_PPQN / 4, 0);
+        seq_load_payload_t *p = seq_build_load_payload(
+            3, 0, SEQ_PPQN, "t3", &ev, 1);
+        actor_send(rt, s->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(1));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 2) {
+        s->step = 3;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 3) {
+        s->step = 4;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 60000 };
+        actor_send(rt, s->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 4) {
+        s->step = 5;
+        actor_send(rt, s->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && s->step == 5) {
+        s->step = 6;
+        actor_set_timer(rt, 200, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && s->step == 6) {
+        s->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static int test_empty_track_skip(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    seq_tester_t ts;
+    memset(&ts, 0, sizeof(ts));
+    ts.seq_id = seq_id;
+    ts.midi_id = midi_id;
+
+    actor_id_t tester = actor_spawn(rt, empty_skip_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+
+    /* Track 3 note 67 should play; no crash from empty tracks */
+    ASSERT(has_note_on(txbuf, txn, 67));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
 /* ── Main ────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -997,6 +2007,18 @@ int main(void) {
     RUN_TEST(test_seek);
     RUN_TEST(test_note_expansion);
     RUN_TEST(test_cc_and_program);
+
+    /* Phase 29.2: Multi-track */
+    RUN_TEST(test_multi_track_load);
+    RUN_TEST(test_multi_track_playback);
+    RUN_TEST(test_polyrhythm);
+    RUN_TEST(test_track_mute);
+    RUN_TEST(test_track_solo);
+    RUN_TEST(test_double_buffer_load);
+    RUN_TEST(test_slot_switch);
+    RUN_TEST(test_mute_unmute_toggle);
+    RUN_TEST(test_solo_mask_cleared);
+    RUN_TEST(test_empty_track_skip);
 
     TEST_REPORT();
 }

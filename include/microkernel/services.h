@@ -122,7 +122,12 @@
 #define MSG_SEQ_SET_TEMPO      ((msg_type_t)0xFF000084)
 #define MSG_SEQ_SET_POSITION   ((msg_type_t)0xFF000085)
 #define MSG_SEQ_SET_LOOP       ((msg_type_t)0xFF000086)
-/* 0xFF000087–0xFF00008F reserved for sequencer extensions */
+/* Phase 29.2: Multi-track sequencer extensions */
+#define MSG_SEQ_MUTE_TRACK     ((msg_type_t)0xFF000087)
+#define MSG_SEQ_SOLO_TRACK     ((msg_type_t)0xFF000088)
+#define MSG_SEQ_SWITCH_SLOT    ((msg_type_t)0xFF000089)
+#define MSG_SEQ_BOUNDARY       ((msg_type_t)0xFF00008A)
+/* 0xFF00008B–0xFF00008F reserved for sequencer extensions */
 #define MSG_SEQ_OK             ((msg_type_t)0xFF000090)
 #define MSG_SEQ_ERROR          ((msg_type_t)0xFF000091)
 #define MSG_SEQ_STATUS         ((msg_type_t)0xFF000092)

@@ -143,6 +143,10 @@ typedef struct __attribute__((packed)) {
  *   MSG_SEQ_SET_TEMPO      0xFF000084  set BPM (seq_tempo_payload_t)
  *   MSG_SEQ_SET_POSITION   0xFF000085  seek (seq_position_payload_t)
  *   MSG_SEQ_SET_LOOP       0xFF000086  set loop (seq_loop_payload_t)
+ *   MSG_SEQ_MUTE_TRACK     0xFF000087  mute/unmute track (seq_mute_payload_t)
+ *   MSG_SEQ_SOLO_TRACK     0xFF000088  solo/unsolo track (seq_solo_payload_t)
+ *   MSG_SEQ_SWITCH_SLOT    0xFF000089  queue slot switch (seq_switch_slot_payload_t)
+ *   MSG_SEQ_BOUNDARY       0xFF00008A  boundary notification (seq_boundary_payload_t)
  *   MSG_SEQ_OK             0xFF000090  success reply (empty)
  *   MSG_SEQ_ERROR          0xFF000091  error reply (error string)
  *   MSG_SEQ_STATUS         0xFF000092  status reply (seq_status_payload_t)
@@ -176,15 +180,52 @@ typedef struct {
 } seq_loop_payload_t;
 
 typedef struct {
+    uint8_t  track;            /* track index (0–7) */
+    bool     muted;            /* true = mute, false = unmute */
+    uint8_t  _pad[2];
+} seq_mute_payload_t;
+
+typedef struct {
+    uint8_t  track;            /* track index (0–7) */
+    bool     soloed;           /* true = solo, false = unsolo */
+    uint8_t  _pad[2];
+} seq_solo_payload_t;
+
+typedef struct {
+    uint8_t  track;            /* track index (0–7) */
+    uint8_t  slot;             /* target slot (0 or 1) */
+    uint8_t  _pad[2];
+} seq_switch_slot_payload_t;
+
+typedef struct {
+    uint8_t  track;            /* track index */
+    uint8_t  active_slot;      /* slot that became active */
+    uint8_t  _pad[2];
+    tick_t   boundary_tick;    /* tick where boundary occurred */
+} seq_boundary_payload_t;
+
+typedef struct {
+    tick_t   pattern_length;
+    uint16_t event_count;
+    uint8_t  active_slot;
+    bool     muted;
+    bool     soloed;
+    bool     pending_switch;
+    uint8_t  _pad[2];
+} seq_track_status_t;
+
+typedef struct {
     bool     playing;
     bool     paused;
     bool     looping;
-    uint8_t  _pad;
+    uint8_t  track_count;      /* number of tracks with patterns */
     uint32_t bpm_x100;
     tick_t   current_tick;
-    tick_t   pattern_length;
-    uint16_t event_count;
-    uint16_t _pad2;
+    tick_t   pattern_length;   /* track 0 for backward compat */
+    uint16_t event_count;      /* track 0 for backward compat */
+    uint8_t  solo_mask;
+    uint8_t  _pad2;
+    seq_track_status_t tracks[SEQ_MAX_TRACKS];
 } seq_status_payload_t;
 
 /* ── Convenience constructors ────────────────────────────────────── */

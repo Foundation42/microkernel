@@ -1129,12 +1129,18 @@ static void cmd_seq(runtime_t *rt, const char *args) {
     if (sub[0] == '\0' || strcmp(sub, "help") == 0) {
         printf(
             "Sequencer commands:\n"
-            "  seq start         Start playback\n"
-            "  seq stop          Stop playback\n"
-            "  seq pause         Pause/resume toggle\n"
-            "  seq tempo <bpm>   Set tempo (BPM)\n"
-            "  seq status        Show sequencer status\n"
-            "  seq demo          Load C major scale demo pattern\n"
+            "  seq start            Start playback\n"
+            "  seq stop             Stop playback\n"
+            "  seq pause            Pause/resume toggle\n"
+            "  seq tempo <bpm>      Set tempo (BPM)\n"
+            "  seq status           Show sequencer status\n"
+            "  seq mute <track>     Mute track (0-7)\n"
+            "  seq unmute <track>   Unmute track\n"
+            "  seq solo <track>     Solo track\n"
+            "  seq unsolo <track>   Unsolo track\n"
+            "  seq switch <t> <s>   Switch track <t> to slot <s>\n"
+            "  seq demo             Load C major scale demo\n"
+            "  seq demo2            Load polyrhythm demo (2 tracks)\n"
         );
         return;
     }
@@ -1194,6 +1200,69 @@ static void cmd_seq(runtime_t *rt, const char *args) {
         return;
     }
 
+    if (strcmp(sub, "mute") == 0 || strcmp(sub, "unmute") == 0) {
+        char val[8];
+        next_word(args, val, sizeof(val));
+        if (val[0] == '\0') {
+            printf("Usage: seq %s <track>\n", sub);
+            return;
+        }
+        int t = atoi(val);
+        if (t < 0 || t >= SEQ_MAX_TRACKS) {
+            printf("Track must be 0–%d\n", SEQ_MAX_TRACKS - 1);
+            return;
+        }
+        seq_mute_payload_t mp = { .track = (uint8_t)t,
+                                  .muted = (strcmp(sub, "mute") == 0) };
+        actor_send(rt, seq, MSG_SEQ_MUTE_TRACK, &mp, sizeof(mp));
+        printf("Track %d %s\n", t, mp.muted ? "muted" : "unmuted");
+        return;
+    }
+
+    if (strcmp(sub, "solo") == 0 || strcmp(sub, "unsolo") == 0) {
+        char val[8];
+        next_word(args, val, sizeof(val));
+        if (val[0] == '\0') {
+            printf("Usage: seq %s <track>\n", sub);
+            return;
+        }
+        int t = atoi(val);
+        if (t < 0 || t >= SEQ_MAX_TRACKS) {
+            printf("Track must be 0–%d\n", SEQ_MAX_TRACKS - 1);
+            return;
+        }
+        seq_solo_payload_t sp = { .track = (uint8_t)t,
+                                  .soloed = (strcmp(sub, "solo") == 0) };
+        actor_send(rt, seq, MSG_SEQ_SOLO_TRACK, &sp, sizeof(sp));
+        printf("Track %d %s\n", t, sp.soloed ? "soloed" : "unsoloed");
+        return;
+    }
+
+    if (strcmp(sub, "switch") == 0) {
+        char tval[8], sval[8];
+        args = next_word(args, tval, sizeof(tval));
+        next_word(args, sval, sizeof(sval));
+        if (tval[0] == '\0' || sval[0] == '\0') {
+            printf("Usage: seq switch <track> <slot>\n");
+            return;
+        }
+        int t = atoi(tval);
+        int sl = atoi(sval);
+        if (t < 0 || t >= SEQ_MAX_TRACKS) {
+            printf("Track must be 0–%d\n", SEQ_MAX_TRACKS - 1);
+            return;
+        }
+        if (sl < 0 || sl > 1) {
+            printf("Slot must be 0 or 1\n");
+            return;
+        }
+        seq_switch_slot_payload_t sw = { .track = (uint8_t)t,
+                                         .slot = (uint8_t)sl };
+        actor_send(rt, seq, MSG_SEQ_SWITCH_SLOT, &sw, sizeof(sw));
+        printf("Track %d queued switch to slot %d\n", t, sl);
+        return;
+    }
+
     if (strcmp(sub, "demo") == 0) {
         /* C major scale as 8th notes */
         uint8_t notes[] = { 60, 62, 64, 65, 67, 69, 71, 72 };
@@ -1214,6 +1283,68 @@ static void cmd_seq(runtime_t *rt, const char *args) {
         free(p);
         printf("Demo pattern loaded (C major scale, 2 bars 8th notes)\n");
         printf("Use 'seq start' to play, 'seq tempo 120' to set speed\n");
+        return;
+    }
+
+    if (strcmp(sub, "demo2") == 0) {
+        /* Montage split: bass below C4, piano above C4, both ch 0 */
+
+        /* Track 0: 4-bar piano melody (above middle C, ch 0) */
+        {
+            seq_event_t events[] = {
+                /* Bar 1: C E G E */
+                seq_note(SEQ_PPQN * 0, 72, 90,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 1, 76, 80,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 2, 79, 85,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 3, 76, 75,  SEQ_PPQN - 10, 0),
+                /* Bar 2: A G F E */
+                seq_note(SEQ_PPQN * 4, 81, 90,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 5, 79, 80,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 6, 77, 85,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 7, 76, 75,  SEQ_PPQN - 10, 0),
+                /* Bar 3: D F A F */
+                seq_note(SEQ_PPQN * 8,  74, 90,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 9,  77, 80,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 10, 81, 85,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 11, 77, 75,  SEQ_PPQN - 10, 0),
+                /* Bar 4: G F E D → resolve to C */
+                seq_note(SEQ_PPQN * 12, 79, 90,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 13, 77, 80,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 14, 76, 85,  SEQ_PPQN - 10, 0),
+                seq_note(SEQ_PPQN * 15, 74, 75,  SEQ_PPQN - 10, 0),
+            };
+            uint16_t n = (uint16_t)(sizeof(events) / sizeof(events[0]));
+            seq_load_payload_t *p = seq_build_load_payload(
+                0, 0, SEQ_PPQN * 16, "Piano", events, n);
+            if (!p) { printf("Out of memory\n"); return; }
+            actor_send(rt, seq, MSG_SEQ_LOAD_PATTERN,
+                       p, seq_load_payload_size(n));
+            free(p);
+        }
+        /* Track 1: 2-bar bass line (below middle C, ch 0) — polyrhythm */
+        {
+            seq_event_t events[] = {
+                /* Bar 1: C2 whole, G2 half, A2 half */
+                seq_note(0,            36, 110, SEQ_PPQN * 2 - 10, 0),  /* C2 */
+                seq_note(SEQ_PPQN * 2, 43, 100, SEQ_PPQN - 10,     0),  /* G2 */
+                seq_note(SEQ_PPQN * 3, 45, 100, SEQ_PPQN - 10,     0),  /* A2 */
+                /* Bar 2: F2 whole, E2 half, D2 half */
+                seq_note(SEQ_PPQN * 4, 41, 110, SEQ_PPQN * 2 - 10, 0),  /* F2 */
+                seq_note(SEQ_PPQN * 6, 40, 100, SEQ_PPQN - 10,     0),  /* E2 */
+                seq_note(SEQ_PPQN * 7, 38, 100, SEQ_PPQN - 10,     0),  /* D2 */
+            };
+            uint16_t n = (uint16_t)(sizeof(events) / sizeof(events[0]));
+            seq_load_payload_t *p = seq_build_load_payload(
+                1, 0, SEQ_PPQN * 8, "Bass", events, n);
+            if (!p) { printf("Out of memory\n"); return; }
+            actor_send(rt, seq, MSG_SEQ_LOAD_PATTERN,
+                       p, seq_load_payload_size(n));
+            free(p);
+        }
+        printf("Montage split demo loaded (all ch 0):\n"
+               "  Track 0: 4-bar piano melody (C5-A5)\n"
+               "  Track 1: 2-bar bass line    (C2-A2)\n"
+               "Use 'seq start' to play, 'seq tempo 100' for tempo\n");
         return;
     }
 
