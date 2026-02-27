@@ -72,6 +72,8 @@ static inline void an_clear_all(active_notes_t *an) {
 typedef struct {
     seq_pattern_t  slots[2];
     active_notes_t active_notes; /* notes currently sounding */
+    seq_fx_chain_t fx_chain;     /* per-track effect chain */
+    uint32_t       humanize_seed; /* xorshift32 PRNG state */
     uint8_t        active_slot;
     uint16_t       event_index;  /* current playback position */
     bool           muted;
@@ -198,6 +200,89 @@ static int expand_note_offs(const seq_event_t *src, uint16_t src_count,
     return out;
 }
 
+/* ── Per-track effects ────────────────────────────────────────────── */
+
+static uint32_t xorshift32(uint32_t *state) {
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static void apply_single_fx(const seq_fx_t *fx, seq_event_t *ev,
+                             uint32_t *humanize_seed) {
+    switch (fx->type) {
+    case SEQ_FX_TRANSPOSE:
+        if (ev->type == SEQ_EVENT_NOTE) {
+            ev->data.note.pitch = pitch_transpose(
+                ev->data.note.pitch,
+                fx->params.transpose.semitones,
+                fx->params.transpose.cents);
+        } else if (ev->type == SEQ_EVENT_NOTE_OFF) {
+            ev->data.note_off.pitch = pitch_transpose(
+                ev->data.note_off.pitch,
+                fx->params.transpose.semitones,
+                fx->params.transpose.cents);
+        }
+        break;
+
+    case SEQ_FX_VELOCITY_SCALE:
+        if (ev->type == SEQ_EVENT_NOTE) {
+            int vel = (int)ev->data.note.velocity *
+                      (int)fx->params.velocity_scale.scale_pct / 100;
+            if (vel < 1) vel = 1;
+            if (vel > 127) vel = 127;
+            ev->data.note.velocity = (uint8_t)vel;
+        }
+        break;
+
+    case SEQ_FX_HUMANIZE: {
+        if (ev->type == SEQ_EVENT_NOTE) {
+            int range = (int)fx->params.humanize.velocity_range;
+            if (range > 0) {
+                uint32_t r = xorshift32(humanize_seed);
+                int offset = (int)(r % (uint32_t)(2 * range + 1)) - range;
+                int vel = (int)ev->data.note.velocity + offset;
+                if (vel < 1) vel = 1;
+                if (vel > 127) vel = 127;
+                ev->data.note.velocity = (uint8_t)vel;
+            }
+        }
+        break;
+    }
+
+    case SEQ_FX_CC_SCALE:
+        if (ev->type == SEQ_EVENT_CONTROL &&
+            ev->data.control.cc_number == fx->params.cc_scale.cc_number) {
+            /* Map 16-bit value (0–65535) to min_val..max_val 7-bit range,
+             * then store back as 16-bit (shifted <<9 for 7-bit compat) */
+            uint8_t val7 = (uint8_t)(ev->data.control.value >> 9);
+            int min_v = (int)fx->params.cc_scale.min_val;
+            int max_v = (int)fx->params.cc_scale.max_val;
+            int mapped = min_v + (int)val7 * (max_v - min_v) / 127;
+            if (mapped < 0) mapped = 0;
+            if (mapped > 127) mapped = 127;
+            ev->data.control.value = (uint16_t)((uint16_t)mapped << 9);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void apply_fx_chain(seq_fx_chain_t *chain, seq_event_t *ev,
+                            uint32_t *humanize_seed) {
+    if (ev->flags & SEQ_FLAG_BYPASS_FX) return;
+    for (int i = 0; i < chain->count; i++) {
+        seq_fx_t *fx = &chain->effects[i];
+        if (!fx->enabled) continue;
+        apply_single_fx(fx, ev, humanize_seed);
+    }
+}
+
 /* ── MIDI output ─────────────────────────────────────────────────── */
 
 static void send_midi(runtime_t *rt, actor_id_t midi_id,
@@ -295,7 +380,9 @@ static void emit_events_in_range(runtime_t *rt, seq_state_t *s,
         const seq_event_t *ev = &pat->events[trk->event_index];
         if (ev->tick >= to) break;
         if (ev->tick >= from) {
-            emit_event(rt, s->midi_id, ev, &trk->active_notes);
+            seq_event_t copy = *ev;
+            apply_fx_chain(&trk->fx_chain, &copy, &trk->humanize_seed);
+            emit_event(rt, s->midi_id, &copy, &trk->active_notes);
         }
         trk->event_index++;
     }
@@ -551,6 +638,7 @@ static void handle_start(seq_state_t *s, runtime_t *rt, message_t *msg) {
     for (int i = 0; i < SEQ_MAX_TRACKS; i++) {
         s->tracks[i].event_index = 0;
         s->tracks[i].pending_switch = false;
+        s->tracks[i].humanize_seed = (uint32_t)(i + 1);
         an_clear_all(&s->tracks[i].active_notes);
     }
 
@@ -707,6 +795,7 @@ static void handle_status_request(seq_state_t *s, runtime_t *rt,
         status.tracks[i].muted = trk->muted;
         status.tracks[i].soloed = trk->soloed;
         status.tracks[i].pending_switch = trk->pending_switch;
+        status.tracks[i].fx_count = trk->fx_chain.count;
         if (pat->events && pat->event_count > 0)
             track_count++;
     }
@@ -797,6 +886,83 @@ static void handle_switch_slot(seq_state_t *s, runtime_t *rt, message_t *msg) {
     reply_ok(rt, msg->source);
 }
 
+/* ── FX handlers ─────────────────────────────────────────────────── */
+
+static void handle_set_fx(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_set_fx_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_set_fx_payload_t *req = (const seq_set_fx_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    if (req->slot >= SEQ_MAX_FX_PER_TRACK) {
+        reply_error(rt, msg->source, "slot index out of range");
+        return;
+    }
+    seq_track_t *trk = &s->tracks[req->track];
+    trk->fx_chain.effects[req->slot] = req->effect;
+    /* Update count to cover this slot */
+    if (req->slot >= trk->fx_chain.count)
+        trk->fx_chain.count = req->slot + 1;
+    reply_ok(rt, msg->source);
+}
+
+static void handle_clear_fx(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_clear_fx_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_clear_fx_payload_t *req =
+        (const seq_clear_fx_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    seq_track_t *trk = &s->tracks[req->track];
+    if (req->slot == 0xFF) {
+        /* Clear all */
+        memset(&trk->fx_chain, 0, sizeof(trk->fx_chain));
+    } else {
+        if (req->slot >= SEQ_MAX_FX_PER_TRACK) {
+            reply_error(rt, msg->source, "slot index out of range");
+            return;
+        }
+        memset(&trk->fx_chain.effects[req->slot], 0, sizeof(seq_fx_t));
+        /* Shrink count if we cleared the last slot */
+        while (trk->fx_chain.count > 0 &&
+               trk->fx_chain.effects[trk->fx_chain.count - 1].type == SEQ_FX_NONE)
+            trk->fx_chain.count--;
+    }
+    reply_ok(rt, msg->source);
+}
+
+static void handle_enable_fx(seq_state_t *s, runtime_t *rt, message_t *msg) {
+    if (msg->payload_size < sizeof(seq_enable_fx_payload_t)) {
+        reply_error(rt, msg->source, "payload too small");
+        return;
+    }
+    const seq_enable_fx_payload_t *req =
+        (const seq_enable_fx_payload_t *)msg->payload;
+    if (req->track >= SEQ_MAX_TRACKS) {
+        reply_error(rt, msg->source, "track index out of range");
+        return;
+    }
+    if (req->slot >= SEQ_MAX_FX_PER_TRACK) {
+        reply_error(rt, msg->source, "slot index out of range");
+        return;
+    }
+    seq_track_t *trk = &s->tracks[req->track];
+    if (req->slot >= trk->fx_chain.count) {
+        reply_error(rt, msg->source, "slot not populated");
+        return;
+    }
+    trk->fx_chain.effects[req->slot].enabled = req->enabled;
+    reply_ok(rt, msg->source);
+}
+
 /* ── Actor behavior ──────────────────────────────────────────────── */
 
 static bool seq_behavior(runtime_t *rt, actor_t *self,
@@ -827,6 +993,9 @@ static bool seq_behavior(runtime_t *rt, actor_t *self,
     case MSG_SEQ_MUTE_TRACK:   handle_mute_track(s, rt, msg);    break;
     case MSG_SEQ_SOLO_TRACK:   handle_solo_track(s, rt, msg);    break;
     case MSG_SEQ_SWITCH_SLOT:  handle_switch_slot(s, rt, msg);   break;
+    case MSG_SEQ_SET_FX:       handle_set_fx(s, rt, msg);        break;
+    case MSG_SEQ_CLEAR_FX:     handle_clear_fx(s, rt, msg);      break;
+    case MSG_SEQ_ENABLE_FX:    handle_enable_fx(s, rt, msg);     break;
     case MSG_SEQ_STATUS:       handle_status_request(s, rt, msg); break;
     default: break;
     }

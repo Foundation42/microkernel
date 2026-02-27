@@ -34,7 +34,7 @@ scheduler with integrated I/O polling.
 - **Local KV storage** -- filesystem-backed key-value actor at `/node/storage/kv`, same interface as Cloudflare KV; works offline
 - **Display + ANSI console** -- multi-board display stack with HAL abstraction: 466x466 AMOLED (SH8601 QSPI) and 800x480 LCD (ST7262 RGB parallel); 8x16 font rendering, virtual terminal with dynamic grid sizing (58x29 or 100x30), ANSI escape sequence parsing, dirty-row tracking; dashboard auto-adapts layout (circular bezel margins vs full-width rectangular); board selected at build time via `idf.py menuconfig`
 - **MIDI** -- full MIDI actor for SC16IS752 UART-to-I2C bridge (31250 baud); hardware reset via GPIO, interrupt-driven receive with byte parser (running status, SysEx, real-time interleaving), subscriber dispatch with channel/message filtering; MIDI monitor actor (human-readable traffic logging); arpeggiator actor (UP/DOWN/UPDOWN/RANDOM patterns, 1-4 octave range, BPM-driven 16th-note stepping, legato output, enable/disable); note sequence player with configurable BPM/velocity/channel
-- **MIDI sequencer** -- pattern-based multi-track sequencer actor with 480 PPQN timing, 16-byte packed event format (note/CC/program/pitch-bend/aftertouch/tempo), microtonal pitch support, note-off pre-expansion at load time, wall-clock tick calculation (integer math, no floats), timer-driven playback with loop/pause/seek/tempo control; 8 independent tracks with variable pattern lengths (polyrhythms via per-track modulo wrapping), double-buffer slot switching at pattern boundaries, Ableton-style mute/solo with bitmask
+- **MIDI sequencer** -- pattern-based multi-track sequencer actor with 480 PPQN timing, 16-byte packed event format (note/CC/program/pitch-bend/aftertouch/tempo), microtonal pitch support, note-off pre-expansion at load time, wall-clock tick calculation (integer math, no floats), timer-driven playback with loop/pause/seek/tempo control; 8 independent tracks with variable pattern lengths (polyrhythms via per-track modulo wrapping), double-buffer slot switching at pattern boundaries, Ableton-style mute/solo with bitmask; per-track effect chains (4 slots: transpose, velocity scale, humanize, CC scale) applied at emit time with bypass flag support
 - **Hardware actors** -- GPIO (digital I/O with interrupt-driven events), I2C (master bus), PWM (duty-cycle control via LEDC), addressable LED (WS2812/NeoPixel strips); message-based HAL abstraction works on both ESP32 and Linux (mock)
 - **Interactive shell** -- native C shell with readline (arrow-key history, line editing), system introspection (`info`/`top`), actor management, hex-encoded binary payloads; runs over UART/stdin on ESP32 or terminal on Linux
 - **ESP32 port** -- full feature parity on ESP32-S3 (Xtensa), ESP32-C6 and ESP32-P4 (RISC-V), including networking, TLS, WASM, hot reload, hardware actors, display, and interactive shell
@@ -310,7 +310,7 @@ Commands: `help`, `list`, `info` (alias `top`), `self`, `whoami`,
 `register <name>`, `lookup <name>`, `ls [/prefix]`,
 `mount <host>[:<port>]`, `caps [target]`,
 `midi <configure|note|cc|pc|send|play|stop|monitor|arp|status>`,
-`seq <start|stop|pause|tempo|status|demo|demo2|mute|unmute|solo|unsolo|switch>`, `exit`
+`seq <start|stop|pause|tempo|status|demo|demo2|mute|unmute|solo|unsolo|switch|fx>`, `exit`
 
 The `send` and `call` commands accept an optional `x:` prefix on the payload to
 send hex-encoded binary data (e.g., `call led 4278190145 x:0000ff000000` sends

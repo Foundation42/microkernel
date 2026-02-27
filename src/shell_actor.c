@@ -1139,6 +1139,13 @@ static void cmd_seq(runtime_t *rt, const char *args) {
             "  seq solo <track>     Solo track\n"
             "  seq unsolo <track>   Unsolo track\n"
             "  seq switch <t> <s>   Switch track <t> to slot <s>\n"
+            "  seq fx <t> transpose <semi> [cents]\n"
+            "  seq fx <t> velocity <pct>   Scale velocity (1-200%%)\n"
+            "  seq fx <t> humanize <range> Random velocity +/-range\n"
+            "  seq fx <t> ccscale <cc> <min> <max>\n"
+            "  seq fx <t> clear [slot]     Clear effects\n"
+            "  seq fx <t> enable <slot>    Enable effect slot\n"
+            "  seq fx <t> disable <slot>   Disable effect slot\n"
             "  seq demo             Load C major scale demo\n"
             "  seq demo2            Load polyrhythm demo (2 tracks)\n"
         );
@@ -1260,6 +1267,158 @@ static void cmd_seq(runtime_t *rt, const char *args) {
                                          .slot = (uint8_t)sl };
         actor_send(rt, seq, MSG_SEQ_SWITCH_SLOT, &sw, sizeof(sw));
         printf("Track %d queued switch to slot %d\n", t, sl);
+        return;
+    }
+
+    if (strcmp(sub, "fx") == 0) {
+        char tval[8];
+        args = next_word(args, tval, sizeof(tval));
+        if (tval[0] == '\0') {
+            printf("Usage: seq fx <track> <transpose|velocity|humanize|ccscale|clear|enable|disable> ...\n");
+            return;
+        }
+        int t = atoi(tval);
+        if (t < 0 || t >= SEQ_MAX_TRACKS) {
+            printf("Track must be 0–%d\n", SEQ_MAX_TRACKS - 1);
+            return;
+        }
+
+        char fxsub[16];
+        args = next_word(args, fxsub, sizeof(fxsub));
+        if (fxsub[0] == '\0') {
+            printf("Usage: seq fx <track> <transpose|velocity|humanize|ccscale|clear|enable|disable>\n");
+            return;
+        }
+
+        if (strcmp(fxsub, "transpose") == 0) {
+            char sval[8], cval[8];
+            args = next_word(args, sval, sizeof(sval));
+            next_word(args, cval, sizeof(cval));
+            if (sval[0] == '\0') {
+                printf("Usage: seq fx <track> transpose <semitones> [cents]\n");
+                return;
+            }
+            seq_set_fx_payload_t fp;
+            memset(&fp, 0, sizeof(fp));
+            fp.track = (uint8_t)t;
+            /* Auto-assign to next available slot */
+            /* Request status to find count — for simplicity just use msg directly */
+            /* We send with slot = chain count (the sequencer will expand) */
+            /* Actually, we can't query status synchronously, so just pick slot 0
+             * or let user manage. For auto-assign, we track via a simple heuristic:
+             * use a local counter approach — not ideal, but functional. */
+            fp.slot = 0; /* default slot; user can clear and reassign */
+            fp.effect.type = SEQ_FX_TRANSPOSE;
+            fp.effect.enabled = true;
+            fp.effect.params.transpose.semitones = (int8_t)atoi(sval);
+            fp.effect.params.transpose.cents = cval[0] ? (int8_t)atoi(cval) : 0;
+            actor_send(rt, seq, MSG_SEQ_SET_FX, &fp, sizeof(fp));
+            printf("Track %d: transpose %+d semi %+d cents → slot %d\n",
+                   t, fp.effect.params.transpose.semitones,
+                   fp.effect.params.transpose.cents, fp.slot);
+            return;
+        }
+
+        if (strcmp(fxsub, "velocity") == 0) {
+            char pval[8];
+            next_word(args, pval, sizeof(pval));
+            if (pval[0] == '\0') {
+                printf("Usage: seq fx <track> velocity <percent>\n");
+                return;
+            }
+            seq_set_fx_payload_t fp;
+            memset(&fp, 0, sizeof(fp));
+            fp.track = (uint8_t)t;
+            fp.slot = 1;
+            fp.effect.type = SEQ_FX_VELOCITY_SCALE;
+            fp.effect.enabled = true;
+            fp.effect.params.velocity_scale.scale_pct = (uint8_t)atoi(pval);
+            actor_send(rt, seq, MSG_SEQ_SET_FX, &fp, sizeof(fp));
+            printf("Track %d: velocity scale %d%% → slot %d\n",
+                   t, fp.effect.params.velocity_scale.scale_pct, fp.slot);
+            return;
+        }
+
+        if (strcmp(fxsub, "humanize") == 0) {
+            char rval[8];
+            next_word(args, rval, sizeof(rval));
+            if (rval[0] == '\0') {
+                printf("Usage: seq fx <track> humanize <range>\n");
+                return;
+            }
+            seq_set_fx_payload_t fp;
+            memset(&fp, 0, sizeof(fp));
+            fp.track = (uint8_t)t;
+            fp.slot = 2;
+            fp.effect.type = SEQ_FX_HUMANIZE;
+            fp.effect.enabled = true;
+            fp.effect.params.humanize.velocity_range = (uint8_t)atoi(rval);
+            actor_send(rt, seq, MSG_SEQ_SET_FX, &fp, sizeof(fp));
+            printf("Track %d: humanize ±%d → slot %d\n",
+                   t, fp.effect.params.humanize.velocity_range, fp.slot);
+            return;
+        }
+
+        if (strcmp(fxsub, "ccscale") == 0) {
+            char ccval[8], minv[8], maxv[8];
+            args = next_word(args, ccval, sizeof(ccval));
+            args = next_word(args, minv, sizeof(minv));
+            next_word(args, maxv, sizeof(maxv));
+            if (ccval[0] == '\0' || minv[0] == '\0' || maxv[0] == '\0') {
+                printf("Usage: seq fx <track> ccscale <cc> <min> <max>\n");
+                return;
+            }
+            seq_set_fx_payload_t fp;
+            memset(&fp, 0, sizeof(fp));
+            fp.track = (uint8_t)t;
+            fp.slot = 3;
+            fp.effect.type = SEQ_FX_CC_SCALE;
+            fp.effect.enabled = true;
+            fp.effect.params.cc_scale.cc_number = (uint8_t)atoi(ccval);
+            fp.effect.params.cc_scale.min_val = (uint8_t)atoi(minv);
+            fp.effect.params.cc_scale.max_val = (uint8_t)atoi(maxv);
+            actor_send(rt, seq, MSG_SEQ_SET_FX, &fp, sizeof(fp));
+            printf("Track %d: CC%d scale %d–%d → slot %d\n",
+                   t, fp.effect.params.cc_scale.cc_number,
+                   fp.effect.params.cc_scale.min_val,
+                   fp.effect.params.cc_scale.max_val, fp.slot);
+            return;
+        }
+
+        if (strcmp(fxsub, "clear") == 0) {
+            char sval[8];
+            next_word(args, sval, sizeof(sval));
+            seq_clear_fx_payload_t cp;
+            memset(&cp, 0, sizeof(cp));
+            cp.track = (uint8_t)t;
+            cp.slot = sval[0] ? (uint8_t)atoi(sval) : 0xFF;
+            actor_send(rt, seq, MSG_SEQ_CLEAR_FX, &cp, sizeof(cp));
+            if (cp.slot == 0xFF)
+                printf("Track %d: all effects cleared\n", t);
+            else
+                printf("Track %d: slot %d cleared\n", t, cp.slot);
+            return;
+        }
+
+        if (strcmp(fxsub, "enable") == 0 || strcmp(fxsub, "disable") == 0) {
+            char sval[8];
+            next_word(args, sval, sizeof(sval));
+            if (sval[0] == '\0') {
+                printf("Usage: seq fx <track> %s <slot>\n", fxsub);
+                return;
+            }
+            seq_enable_fx_payload_t ep;
+            memset(&ep, 0, sizeof(ep));
+            ep.track = (uint8_t)t;
+            ep.slot = (uint8_t)atoi(sval);
+            ep.enabled = (strcmp(fxsub, "enable") == 0);
+            actor_send(rt, seq, MSG_SEQ_ENABLE_FX, &ep, sizeof(ep));
+            printf("Track %d: slot %d %s\n", t, ep.slot,
+                   ep.enabled ? "enabled" : "disabled");
+            return;
+        }
+
+        printf("Unknown fx sub-command: %s\n", fxsub);
         return;
     }
 

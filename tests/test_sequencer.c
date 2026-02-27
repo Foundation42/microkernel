@@ -2233,6 +2233,536 @@ static int test_mute_kills_hanging_notes(void) {
     return 0;
 }
 
+/* ── FX helper: get velocity of first Note On for a given note ──── */
+
+static int get_note_on_velocity(const uint8_t *buf, int len, uint8_t note) {
+    for (int i = 0; i + 2 < len; ) {
+        uint8_t status = buf[i];
+        if ((status & 0xF0) == 0x90 && buf[i + 1] == note && buf[i + 2] > 0)
+            return buf[i + 2];
+        if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0)
+            i += 2;
+        else
+            i += 3;
+    }
+    return -1;
+}
+
+/* Helper: get first CC value for a given cc_number */
+static int get_cc_value(const uint8_t *buf, int len, uint8_t cc) {
+    for (int i = 0; i + 2 < len; ) {
+        uint8_t status = buf[i];
+        if ((status & 0xF0) == 0xB0 && buf[i + 1] == cc)
+            return buf[i + 2];
+        if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0)
+            i += 2;
+        else
+            i += 3;
+    }
+    return -1;
+}
+
+/* ── FX tester behavior: configures MIDI, loads pattern, sets FX,
+ *    plays at fast tempo, waits, stops ──────────────────────────── */
+
+/*
+ * FX tester state extension: stores the FX payload to send.
+ * The generic flow is:
+ *   step 0: bootstrap → configure MIDI
+ *   step 1: MIDI OK → load pattern on track 0
+ *   step 2: SEQ OK → set FX via MSG_SEQ_SET_FX (or skip if no fx_payload)
+ *   step 3: SEQ OK → disable loop
+ *   step 4: SEQ OK → set fast tempo + clear TX
+ *   step 5: SEQ OK → start
+ *   step 6: SEQ OK → wait timer
+ *   step 7: TIMER → stop
+ */
+
+typedef struct {
+    seq_tester_t     base;
+
+    /* Pattern setup */
+    seq_event_t     *events;
+    uint16_t         event_count;
+    tick_t           pattern_length;
+
+    /* FX to apply (up to 2 for chain tests) */
+    seq_set_fx_payload_t fx[2];
+    int              fx_count;
+
+    /* Optional: enable/disable payload */
+    bool             use_enable;
+    seq_enable_fx_payload_t enable_pl;
+
+    /* Optional: clear payload */
+    bool             use_clear;
+    seq_clear_fx_payload_t clear_pl;
+} fx_tester_t;
+
+static bool fx_generic_tester(runtime_t *rt, actor_t *self,
+                               message_t *msg, void *state) {
+    (void)self;
+    fx_tester_t *s = state;
+    seq_tester_t *b = &s->base;
+
+    if (msg->type == 1 && b->step == 0) {
+        b->step = 1;
+        send_midi_config(rt, b->midi_id);
+        return true;
+    }
+
+    if (msg->type == MSG_MIDI_OK && b->step == 1) {
+        b->step = 2;
+        seq_load_payload_t *p = seq_build_load_payload(
+            0, 0, s->pattern_length, "fx_test", s->events, s->event_count);
+        actor_send(rt, b->seq_id, MSG_SEQ_LOAD_PATTERN,
+                   p, seq_load_payload_size(s->event_count));
+        free(p);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && b->step == 2) {
+        b->step = 3;
+        /* Send FX payloads */
+        for (int i = 0; i < s->fx_count; i++) {
+            actor_send(rt, b->seq_id, MSG_SEQ_SET_FX,
+                       &s->fx[i], sizeof(s->fx[i]));
+        }
+        if (s->fx_count == 0) {
+            /* Skip FX step — proceed to disable loop */
+            b->step = 3;
+            seq_loop_payload_t lp = { .enabled = false };
+            actor_send(rt, b->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        }
+        return true;
+    }
+
+    /* After FX OK replies (one per fx sent), handle enable/clear if needed */
+    if (msg->type == MSG_SEQ_OK && b->step == 3) {
+        b->ok_count++;
+        if (b->ok_count < s->fx_count + 1) /* +1 for load OK already counted */
+            return true;
+
+        /* All FX set; optionally send enable/disable */
+        if (s->use_enable) {
+            b->step = 30;
+            actor_send(rt, b->seq_id, MSG_SEQ_ENABLE_FX,
+                       &s->enable_pl, sizeof(s->enable_pl));
+            return true;
+        }
+        if (s->use_clear) {
+            b->step = 31;
+            actor_send(rt, b->seq_id, MSG_SEQ_CLEAR_FX,
+                       &s->clear_pl, sizeof(s->clear_pl));
+            return true;
+        }
+
+        b->step = 4;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, b->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && (b->step == 30 || b->step == 31)) {
+        b->step = 4;
+        seq_loop_payload_t lp = { .enabled = false };
+        actor_send(rt, b->seq_id, MSG_SEQ_SET_LOOP, &lp, sizeof(lp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && b->step == 4) {
+        b->step = 5;
+        midi_mock_clear_tx();
+        seq_tempo_payload_t tp = { .bpm_x100 = 120000 };  /* 1200 BPM */
+        actor_send(rt, b->seq_id, MSG_SEQ_SET_TEMPO, &tp, sizeof(tp));
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && b->step == 5) {
+        b->step = 6;
+        actor_send(rt, b->seq_id, MSG_SEQ_START, NULL, 0);
+        return true;
+    }
+
+    if (msg->type == MSG_SEQ_OK && b->step == 6) {
+        b->step = 7;
+        actor_set_timer(rt, 100, false);
+        return true;
+    }
+
+    if (msg->type == MSG_TIMER && b->step == 7) {
+        b->done = true;
+        runtime_stop(rt);
+        return false;
+    }
+
+    return true;
+}
+
+static void fx_tester_init(fx_tester_t *s, actor_id_t seq_id,
+                            actor_id_t midi_id) {
+    memset(s, 0, sizeof(*s));
+    s->base.seq_id = seq_id;
+    s->base.midi_id = midi_id;
+    s->base.ok_count = 1;  /* load pattern OK is already counted in step 2→3 */
+}
+
+/* ── test_fx_transpose ──────────────────────────────────────────── */
+
+static int test_fx_transpose(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    /* Single C4 note */
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Transpose +7 semitones */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_TRANSPOSE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.transpose.semitones = 7;
+    ts.fx[0].effect.params.transpose.cents = 0;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    /* Should have note 67 (G4), not 60 (C4) */
+    ASSERT(has_note_on(txbuf, txn, 67));
+    ASSERT(!has_note_on(txbuf, txn, 60));
+    /* Note Off should also be 67 */
+    ASSERT(has_note_off(txbuf, txn, 67));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_velocity_scale ─────────────────────────────────────── */
+
+static int test_fx_velocity_scale(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Scale velocity to 50% */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_VELOCITY_SCALE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.velocity_scale.scale_pct = 50;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    int vel = get_note_on_velocity(txbuf, txn, 60);
+    ASSERT(vel == 50);  /* 100 * 50/100 = 50 */
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_humanize ───────────────────────────────────────────── */
+
+static int test_fx_humanize(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Humanize with range=20 */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_HUMANIZE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.humanize.velocity_range = 20;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    int vel = get_note_on_velocity(txbuf, txn, 60);
+    ASSERT(vel >= 0);          /* note was played */
+    ASSERT(vel >= 80);         /* 100 - 20 */
+    ASSERT(vel <= 120);        /* 100 + 20 */
+    /* With xorshift32(seed=1), result should differ from 100 */
+    /* (But it might not always — the test verifies range is plausible) */
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_chain_order ────────────────────────────────────────── */
+
+static int test_fx_chain_order(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Slot 0: transpose +12, Slot 1: velocity 50% */
+    ts.fx_count = 2;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_TRANSPOSE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.transpose.semitones = 12;
+    ts.fx[0].effect.params.transpose.cents = 0;
+
+    ts.fx[1].track = 0;
+    ts.fx[1].slot = 1;
+    ts.fx[1].effect.type = SEQ_FX_VELOCITY_SCALE;
+    ts.fx[1].effect.enabled = true;
+    ts.fx[1].effect.params.velocity_scale.scale_pct = 50;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    /* Note should be 72 (60+12) */
+    ASSERT(has_note_on(txbuf, txn, 72));
+    ASSERT(!has_note_on(txbuf, txn, 60));
+    /* Velocity should be 50 */
+    int vel = get_note_on_velocity(txbuf, txn, 72);
+    ASSERT(vel == 50);
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_bypass_flag ────────────────────────────────────────── */
+
+static int test_fx_bypass_flag(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    /* Note with BYPASS_FX flag */
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ev.flags |= SEQ_FLAG_BYPASS_FX;
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Transpose +7 (should be bypassed) */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_TRANSPOSE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.transpose.semitones = 7;
+    ts.fx[0].effect.params.transpose.cents = 0;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    /* Note should still be 60 (bypass) */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(!has_note_on(txbuf, txn, 67));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_enable_disable ─────────────────────────────────────── */
+
+static int test_fx_enable_disable(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Set transpose +7 */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_TRANSPOSE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.transpose.semitones = 7;
+    ts.fx[0].effect.params.transpose.cents = 0;
+
+    /* Then disable it */
+    ts.use_enable = true;
+    ts.enable_pl.track = 0;
+    ts.enable_pl.slot = 0;
+    ts.enable_pl.enabled = false;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    /* Disabled: note should be 60 (untransposed) */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(!has_note_on(txbuf, txn, 67));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_clear ──────────────────────────────────────────────── */
+
+static int test_fx_clear(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    seq_event_t ev = seq_note(0, 60, 100, SEQ_PPQN / 4, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* Set transpose +7 */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_TRANSPOSE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.transpose.semitones = 7;
+    ts.fx[0].effect.params.transpose.cents = 0;
+
+    /* Then clear all FX */
+    ts.use_clear = true;
+    ts.clear_pl.track = 0;
+    ts.clear_pl.slot = 0xFF;  /* clear all */
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    /* Cleared: note should be 60 */
+    ASSERT(has_note_on(txbuf, txn, 60));
+    ASSERT(!has_note_on(txbuf, txn, 67));
+
+    runtime_destroy(rt);
+    return 0;
+}
+
+/* ── test_fx_cc_scale ───────────────────────────────────────────── */
+
+static int test_fx_cc_scale(void) {
+    runtime_t *rt = runtime_init(1, 64);
+    ns_actor_init(rt);
+    actor_id_t midi_id = midi_actor_init(rt);
+    actor_id_t seq_id = sequencer_init(rt);
+
+    fx_tester_t ts;
+    fx_tester_init(&ts, seq_id, midi_id);
+
+    /* CC1 (mod wheel) val=64 at tick 0 */
+    seq_event_t ev = seq_cc(0, 1, 64, 0);
+    ts.events = &ev;
+    ts.event_count = 1;
+    ts.pattern_length = SEQ_PPQN;
+
+    /* CCScale: CC1, min=0, max=50 */
+    ts.fx_count = 1;
+    ts.fx[0].track = 0;
+    ts.fx[0].slot = 0;
+    ts.fx[0].effect.type = SEQ_FX_CC_SCALE;
+    ts.fx[0].effect.enabled = true;
+    ts.fx[0].effect.params.cc_scale.cc_number = 1;
+    ts.fx[0].effect.params.cc_scale.min_val = 0;
+    ts.fx[0].effect.params.cc_scale.max_val = 50;
+
+    actor_id_t tester = actor_spawn(rt, fx_generic_tester, &ts, NULL, 64);
+    actor_send(rt, tester, 1, NULL, 0);
+    runtime_run(rt);
+
+    ASSERT(ts.base.done);
+
+    uint8_t txbuf[256];
+    int txn = midi_mock_get_tx(txbuf, sizeof(txbuf));
+    int cc_val = get_cc_value(txbuf, txn, 1);
+    /* Input val=64, range 0–127 mapped to 0–50: 0 + 64*50/127 = 25 */
+    ASSERT(cc_val >= 0);   /* CC was sent */
+    ASSERT(cc_val >= 24 && cc_val <= 26);  /* ~25 with integer rounding */
+
+    runtime_destroy(rt);
+    return 0;
+}
+
 /* ── Main ────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -2264,6 +2794,16 @@ int main(void) {
     /* Active note tracking */
     RUN_TEST(test_solo_kills_hanging_notes);
     RUN_TEST(test_mute_kills_hanging_notes);
+
+    /* Phase 29.3: Per-track effects */
+    RUN_TEST(test_fx_transpose);
+    RUN_TEST(test_fx_velocity_scale);
+    RUN_TEST(test_fx_humanize);
+    RUN_TEST(test_fx_chain_order);
+    RUN_TEST(test_fx_bypass_flag);
+    RUN_TEST(test_fx_enable_disable);
+    RUN_TEST(test_fx_clear);
+    RUN_TEST(test_fx_cc_scale);
 
     TEST_REPORT();
 }

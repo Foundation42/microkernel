@@ -128,9 +128,58 @@ typedef struct __attribute__((packed)) {
 
 /* ── Limits ──────────────────────────────────────────────────────── */
 
-#define SEQ_MAX_EVENTS   512    /* max source events per pattern load */
-#define SEQ_MAX_EXPANDED 1024   /* after note-off expansion */
-#define SEQ_MAX_TRACKS   8
+#define SEQ_MAX_EVENTS       512    /* max source events per pattern load */
+#define SEQ_MAX_EXPANDED     1024   /* after note-off expansion */
+#define SEQ_MAX_TRACKS       8
+#define SEQ_MAX_FX_PER_TRACK 4
+
+/* ── Per-track effects ───────────────────────────────────────────── */
+
+typedef enum {
+    SEQ_FX_NONE = 0,
+    SEQ_FX_TRANSPOSE,
+    SEQ_FX_VELOCITY_SCALE,
+    SEQ_FX_HUMANIZE,
+    SEQ_FX_CC_SCALE,
+} seq_fx_type_t;
+
+typedef struct {
+    int8_t semitones;       /* -127..+127 */
+    int8_t cents;           /* -99..+99 */
+} seq_fx_transpose_params_t;
+
+typedef struct {
+    uint8_t scale_pct;      /* 1–200 (percentage, 100 = unity) */
+} seq_fx_velocity_scale_params_t;
+
+typedef struct {
+    uint8_t velocity_range; /* 0–127: random +/- range applied to velocity */
+} seq_fx_humanize_params_t;
+
+typedef struct {
+    uint8_t cc_number;      /* CC to match */
+    uint8_t min_val;        /* output range min (0–127) */
+    uint8_t max_val;        /* output range max (0–127) */
+} seq_fx_cc_scale_params_t;
+
+typedef struct {
+    uint8_t       type;     /* seq_fx_type_t */
+    bool          enabled;
+    uint8_t       _pad[2];
+    union {
+        seq_fx_transpose_params_t       transpose;
+        seq_fx_velocity_scale_params_t  velocity_scale;
+        seq_fx_humanize_params_t        humanize;
+        seq_fx_cc_scale_params_t        cc_scale;
+        uint8_t raw[8];
+    } params;
+} seq_fx_t;    /* 12 bytes */
+
+typedef struct {
+    seq_fx_t effects[SEQ_MAX_FX_PER_TRACK];
+    uint8_t  count;
+    uint8_t  _pad[3];
+} seq_fx_chain_t;
 
 /* ── Message payloads ────────────────────────────────────────────── */
 
@@ -147,6 +196,9 @@ typedef struct __attribute__((packed)) {
  *   MSG_SEQ_SOLO_TRACK     0xFF000088  solo/unsolo track (seq_solo_payload_t)
  *   MSG_SEQ_SWITCH_SLOT    0xFF000089  queue slot switch (seq_switch_slot_payload_t)
  *   MSG_SEQ_BOUNDARY       0xFF00008A  boundary notification (seq_boundary_payload_t)
+ *   MSG_SEQ_SET_FX         0xFF00008B  set effect on track (seq_set_fx_payload_t)
+ *   MSG_SEQ_CLEAR_FX       0xFF00008C  clear effect(s) (seq_clear_fx_payload_t)
+ *   MSG_SEQ_ENABLE_FX      0xFF00008D  enable/disable effect (seq_enable_fx_payload_t)
  *   MSG_SEQ_OK             0xFF000090  success reply (empty)
  *   MSG_SEQ_ERROR          0xFF000091  error reply (error string)
  *   MSG_SEQ_STATUS         0xFF000092  status reply (seq_status_payload_t)
@@ -204,6 +256,27 @@ typedef struct {
     tick_t   boundary_tick;    /* tick where boundary occurred */
 } seq_boundary_payload_t;
 
+/* FX message payloads */
+typedef struct {
+    uint8_t  track;         /* 0–7 */
+    uint8_t  slot;          /* effect slot 0–3 */
+    uint8_t  _pad[2];
+    seq_fx_t effect;        /* effect definition */
+} seq_set_fx_payload_t;
+
+typedef struct {
+    uint8_t  track;         /* 0–7 */
+    uint8_t  slot;          /* slot index, or 0xFF = clear all */
+    uint8_t  _pad[2];
+} seq_clear_fx_payload_t;
+
+typedef struct {
+    uint8_t  track;         /* 0–7 */
+    uint8_t  slot;          /* effect slot 0–3 */
+    bool     enabled;
+    uint8_t  _pad;
+} seq_enable_fx_payload_t;
+
 typedef struct {
     tick_t   pattern_length;
     uint16_t event_count;
@@ -211,7 +284,8 @@ typedef struct {
     bool     muted;
     bool     soloed;
     bool     pending_switch;
-    uint8_t  _pad[2];
+    uint8_t  fx_count;
+    uint8_t  _pad;
 } seq_track_status_t;
 
 typedef struct {
