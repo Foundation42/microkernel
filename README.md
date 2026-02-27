@@ -423,6 +423,15 @@ to decode the hex string into a binary payload instead of sending it as text.
 
 ### MIDI
 
+![MIDI CoPilot LITE — top view](docs/MIDI-CoPilot-Lite.jpg)
+*MIDI CoPilot LITE shield (designed with Gustavo) — SC16IS752 dual UART, DIN-5 IN/OUT/THRU, I2C header*
+
+![MIDI CoPilot LITE — side view with LCD 4.3B](docs/MIDI-CoPilot-Lite-Side.jpg)
+*Shield mounted on Waveshare LCD 4.3B via header pins*
+
+![MIDI CoPilot LITE — wired to ESP32-P4](docs/MIDI-CoPilot-Lite-Wired.jpg)
+*Shield wired to ESP32-P4-Pico over I2C + IRQ — running the microkernel MIDI actor*
+
 The MIDI actor drives an SC16IS752 dual UART-to-I2C bridge for standard
 MIDI IN/OUT at 31250 baud. Channel A handles receive (interrupt-driven via
 IRQ pin), Channel B handles transmit. The byte-level parser handles running
