@@ -486,6 +486,83 @@ pin assignments for ESP32-P4-Pico: SDA=GPIO7, SCL=GPIO8, IRQ=GPIO3, RST=GPIO2.
 The MIDI HAL shares the I2C bus with other peripherals (display, touch) when
 present -- it detects an already-installed driver and skips bus setup.
 
+### MIDI Sequencer
+
+The sequencer actor (`/sys/sequencer`) is a pattern-based multi-track MIDI
+engine with 480 PPQN resolution, wall-clock tick calculation (integer math,
+no floats), and timer-driven playback.
+
+**Highlights:**
+
+- **8 independent tracks** with variable-length patterns -- different lengths
+  create polyrhythms automatically (4-bar melody over 2-bar bass = polyrhythmic feel)
+- **Double-buffer slots** per track -- load the next pattern into slot B while
+  slot A plays, switch seamlessly at the pattern boundary
+- **Mute/solo** with Ableton-style bitmask -- multiple tracks can solo, hanging
+  notes killed instantly on mute
+- **Per-track effect chains** (4 slots each) -- transpose, velocity scale,
+  humanize (random velocity), CC remapping -- applied at emit time, originals
+  untouched
+- **16-byte packed events** -- note, CC, program, pitch bend, aftertouch, tempo
+  changes in a single sorted timeline
+- **Microtonal pitch** -- 16-bit pitch representation (MIDI note + cents), no
+  floating point
+- **Note-off auto-generation** -- only specify Note On; durations are expanded
+  and sorted at load time
+
+**Shell example -- polyrhythm with effects:**
+
+```
+> midi configure                    # init MIDI hardware
+> seq demo2                         # load 2-track demo:
+                                    #   Track 0: 4-bar piano (C5-A5)
+                                    #   Track 1: 2-bar bass (C2-A2)
+
+> seq tempo 105                     # set BPM
+> seq fx 0 transpose 5              # piano up a fourth
+> seq fx 0 velocity 80              # soften piano
+> seq fx 0 humanize 10              # add feel (+/-10 velocity)
+> seq fx 1 transpose -12            # bass down an octave
+> seq start                         # play
+
+> seq solo 1                        # hear just the bass
+> seq unsolo 1                      # bring piano back
+> seq mute 0                        # mute piano
+> seq unmute 0                      # unmute
+
+> seq fx 0 clear                    # remove all piano effects
+> seq stop                          # stop
+```
+
+**Shell sequencer commands:**
+
+```
+> seq start                         # start playback
+> seq stop                          # stop playback
+> seq pause                         # pause/resume toggle
+> seq tempo <bpm>                   # set tempo (1-300)
+> seq status                        # show state + per-track info
+> seq demo                          # load C major scale demo
+> seq demo2                         # load 2-track polyrhythm demo
+> seq mute <track>                  # mute track (0-7)
+> seq unmute <track>                # unmute track
+> seq solo <track>                  # solo track
+> seq unsolo <track>                # unsolo track
+> seq switch <track> <slot>         # queue slot switch at boundary
+> seq fx <track> transpose <s> [c]  # transpose (semitones, opt cents)
+> seq fx <track> velocity <pct>     # velocity scale (1-200%)
+> seq fx <track> humanize <range>   # random velocity +/-range
+> seq fx <track> ccscale <cc> <m> <M>  # remap CC to min-max
+> seq fx <track> clear [slot]       # clear effects (all or one slot)
+> seq fx <track> enable <slot>      # enable effect slot
+> seq fx <track> disable <slot>     # disable effect slot
+```
+
+For the full guide including C API reference, event format, timing internals,
+and design rationale, see [docs/sequencer-guide.md](docs/sequencer-guide.md).
+For the technical specification and future roadmap (AI generation, clip launcher,
+touch UI), see [docs/Sequencer.md](docs/Sequencer.md).
+
 ## Project structure
 
 ```
@@ -523,6 +600,8 @@ component is fetched automatically from the IDF component registry on first buil
 - [API Reference](docs/api.md) -- public functions and types
 - [Examples](docs/examples.md) -- runnable code for each feature
 - [Development Guide](docs/development.md) -- build system, testing, contributing
+- [Sequencer Guide](docs/sequencer-guide.md) -- multi-track MIDI sequencer usage, effects, C API
+- [Sequencer Spec](docs/Sequencer.md) -- technical specification and future roadmap
 
 ## License
 
